@@ -1,4 +1,4 @@
-# claude-command-os
+# claude-agentic-os
 
 A local, single-binary command centre for Claude Code: observability dashboard,
 human-in-the-loop task queue, and a Mission Control dispatcher that runs
