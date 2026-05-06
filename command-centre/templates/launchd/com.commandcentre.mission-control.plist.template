@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.commandcentre.mission-control</string>
+
+  <!-- IMPORTANT: point at homebrew or venv Python, NOT /usr/bin/python3
+       (3.9 on macOS) if any module uses 3.10+ syntax. install.sh fills
+       this in via `sed` before loading. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{PYTHON}}</string>
+    <string>{{INSTALL_DIR}}/.claude/skills/mission-control/scripts/heartbeat.py</string>
+    <string>--loop</string>
+    <string>--interval</string>
+    <string>120</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CC_INSTALL_DIR</key>       <string>{{INSTALL_DIR}}</string>
+    <key>CC_PROJECT_ROOT</key>      <string>{{PROJECT_ROOT}}</string>
+    <key>CC_PORT</key>              <string>{{PORT}}</string>
+    <key>CC_DASHBOARD_URL</key>     <string>http://127.0.0.1:{{PORT}}</string>
+    <key>MISSION_CONTROL_DEFAULT_MODEL</key> <string>{{DEFAULT_MODEL}}</string>
+    <key>MISSION_CONTROL_MAX_CONCURRENT</key> <string>3</string>
+    <key>TASK_TIMEOUT_SECONDS</key> <string>1800</string>
+    <!-- Inherit a minimal PATH so `claude` on /usr/local/bin works. -->
+    <key>PATH</key> <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>{{INSTALL_DIR}}</string>
+
+  <key>RunAtLoad</key>      <true/>
+  <key>KeepAlive</key>      <true/>
+  <key>ThrottleInterval</key> <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>{{INSTALL_DIR}}/logs/mission-control.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{INSTALL_DIR}}/logs/mission-control.stderr.log</string>
+</dict>
+</plist>

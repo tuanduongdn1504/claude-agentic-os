@@ -1,0 +1,159 @@
+#!/bin/bash
+# cc — Command Centre launcher shim.
+# Installed as $INSTALL_DIR/bin/cc; optionally symlinked to ~/.local/bin/cc.
+#
+# Usage:
+#   cc start                 launch the server (nohup)
+#   cc stop                  stop the server
+#   cc restart               stop + start
+#   cc status                show running PIDs + /api/health
+#   cc doctor                deterministic health check
+#   cc sync                  run sync_sessions.py --full
+#   cc logs [N]              tail -n N of server + mission-control logs (default 50)
+#   cc setup otel            re-run OTEL wizard
+#   cc setup telegram        re-run Telegram wizard (stub until wired)
+#   cc trigger               kick dispatcher (heartbeat --once)
+#   cc version               print version
+set -euo pipefail
+
+SELF="$(cd "$(dirname "$0")" && pwd)"
+# INSTALL_DIR is bin/ parent (the install layout). If we were invoked from
+# the repo root (dev), the sibling `scripts/` folder is next to this file.
+if [ -d "$SELF/../scripts" ]; then
+    INSTALL_DIR="$(cd "$SELF/.." && pwd)"
+else
+    INSTALL_DIR="$SELF"  # fallback for development
+fi
+VENV="$INSTALL_DIR/venv"
+PY="$VENV/bin/python3"
+[ -x "$PY" ] || PY="/usr/bin/python3"
+
+# shellcheck disable=SC1091
+[ -f "$INSTALL_DIR/.env" ] && set -a && . "$INSTALL_DIR/.env" && set +a
+# shellcheck disable=SC1091
+[ -f "$INSTALL_DIR/config" ] && set -a && . "$INSTALL_DIR/config" && set +a
+
+PORT="${CC_PORT:-8765}"
+HOST="${CC_HOST:-127.0.0.1}"
+LOGS="$INSTALL_DIR/logs"
+PIDFILE="$INSTALL_DIR/.cc-server.pid"
+mkdir -p "$LOGS"
+
+cmd_start() {
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo "already running (pid $(cat "$PIDFILE")) on :$PORT"; exit 0
+  fi
+  cd "$INSTALL_DIR"
+  CC_HOST="$HOST" CC_PORT="$PORT" CC_INSTALL_DIR="$INSTALL_DIR" \
+    nohup "$PY" scripts/server.py >> "$LOGS/server.stdout.log" 2>> "$LOGS/server.stderr.log" &
+  local pid=$!
+  echo "$pid" > "$PIDFILE"
+  # Poll for readiness — FastAPI + uvicorn cold-start is ~1-2s.
+  local ready=0 i=0
+  while [ "$i" -lt 30 ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "start failed — check $LOGS/server.stderr.log" >&2
+      rm -f "$PIDFILE"; exit 1
+    fi
+    if curl -sS --max-time 1 "http://$HOST:$PORT/api/health" >/dev/null 2>&1; then
+      ready=1; break
+    fi
+    sleep 0.2; i=$((i+1))
+  done
+  if [ "$ready" = "0" ]; then
+    echo "started pid $pid but health endpoint not answering after 6s (may still be booting) · http://$HOST:$PORT"
+  else
+    echo "started pid $pid · http://$HOST:$PORT"
+  fi
+}
+
+cmd_stop() {
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    kill "$(cat "$PIDFILE")" || true
+    rm -f "$PIDFILE"
+    echo "stopped"
+  else
+    # Fallback: pkill by script path.
+    pkill -f "$INSTALL_DIR/scripts/server.py" && echo "stopped (pkill)" || echo "not running"
+    rm -f "$PIDFILE" 2>/dev/null || true
+  fi
+}
+
+cmd_restart() { cmd_stop || true; sleep 0.4; cmd_start; }
+
+cmd_status() {
+  if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo "server: pid $(cat "$PIDFILE") on :$PORT"
+  else
+    echo "server: not running"
+  fi
+  if command -v curl >/dev/null; then
+    local body
+    body="$(curl -sS --max-time 2 "http://$HOST:$PORT/api/health" 2>/dev/null)" && \
+      echo "health: $body" || echo "health: unreachable"
+  fi
+}
+
+cmd_doctor()  { "$PY" "$INSTALL_DIR/scripts/doctor.py" "$@"; }
+cmd_sync()    { "$PY" "$INSTALL_DIR/scripts/sync_sessions.py" --full "$@"; }
+
+cmd_logs() {
+  local n="${1:-50}"
+  for f in "$LOGS"/server.stdout.log "$LOGS"/server.stderr.log \
+           "$LOGS"/mission-control.stdout.log "$LOGS"/mission-control.stderr.log; do
+    if [ -f "$f" ]; then
+      echo "== $f =="
+      tail -n "$n" "$f"
+      echo
+    fi
+  done
+}
+
+cmd_setup() {
+  case "${1:-}" in
+    otel)      "$PY" "$INSTALL_DIR/scripts/setup_otel.py" "${@:2}" ;;
+    telegram)  "$PY" "$INSTALL_DIR/scripts/setup_telegram.py" "${@:2}" 2>/dev/null \
+                || echo "setup telegram not wired yet (Telegram bridge milestone)" ;;
+    *)         echo "usage: cc setup {otel|telegram}"; exit 2 ;;
+  esac
+}
+
+cmd_trigger() {
+  command -v curl >/dev/null && curl -sS -X POST "http://$HOST:$PORT/api/dispatcher/trigger"; echo
+}
+
+cmd_version() { echo "command-centre · dev"; }
+
+case "${1:-}" in
+  start)   shift; cmd_start "$@" ;;
+  stop)    shift; cmd_stop "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  status)  shift; cmd_status "$@" ;;
+  doctor)  shift; cmd_doctor "$@" ;;
+  sync)    shift; cmd_sync "$@" ;;
+  logs)    shift; cmd_logs "$@" ;;
+  setup)   shift; cmd_setup "$@" ;;
+  trigger) shift; cmd_trigger "$@" ;;
+  version) shift; cmd_version ;;
+  ""|-h|--help|help)
+    cat <<EOF
+cc — Command Centre launcher
+
+  cc start               launch server
+  cc stop                stop server
+  cc restart             stop + start
+  cc status              pid + /api/health
+  cc doctor              deterministic health check
+  cc sync                sync_sessions --full
+  cc logs [N]            tail server + mission-control logs (default 50)
+  cc setup otel          re-run OTEL wizard
+  cc setup telegram      re-run Telegram wizard (stub)
+  cc trigger             POST /api/dispatcher/trigger
+  cc version
+
+Install dir:  $INSTALL_DIR
+Dashboard:    http://$HOST:$PORT
+EOF
+    ;;
+  *) echo "unknown: $1"; exit 2 ;;
+esac

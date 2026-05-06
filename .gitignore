@@ -1,0 +1,54 @@
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+.cache/
+*.tsbuildinfo
+
+# Tests + screenshots
+.screenshots/
+test-results/
+playwright-report/
+
+# Runtime data + logs (NEVER commit these — local SQLite has session content)
+command-centre/data/
+command-centre/logs/
+command-centre/.tmp/
+command-centre/.cc-server.pid
+
+# Secrets — only `.env.example` is tracked
+.env
+.env.*
+!.env.example
+
+# Installer scratch / build artifacts
+command-centre/venv/
+command-centre/ui/dist/
+command-centre/ui/.screenshots/
+
+# Claude Code session-local permission grants (per-machine, never tracked)
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# Misc
+*.log
+*.bak.*
+*.zip

@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+
+html, body, #root {
+  height: 100%;
+  background-color: #0a0a0f;
+}
+
+body {
+  background-image:
+    radial-gradient(circle at 15% 8%, rgba(77, 124, 255, 0.09), transparent 45%),
+    radial-gradient(circle at 85% 60%, rgba(139, 92, 246, 0.07), transparent 50%);
+  background-attachment: fixed;
+  font-feature-settings: 'ss01', 'cv11';
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Scrollbar ---------- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #22222f;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #3d3d5c; background-clip: padding-box; border: 2px solid transparent; }
+
+/* ---------- Kicker (uppercase mono label) ---------- */
+.kicker {
+  @apply font-mono uppercase text-[11px] tracking-[1.8px] text-text-subtle;
+}
+
+/* ---------- Focus ring ---------- */
+:focus-visible {
+  outline: 2px solid #4d7cff;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* ---------- Utility: paired cards match heights ---------- */
+.grid-match > * { height: 100%; }
+
+/* ---------- Numeric tabular ---------- */
+.num { font-variant-numeric: tabular-nums; }
