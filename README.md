@@ -26,10 +26,18 @@ Claude Code data shapes (subagents tracked, system events captured for
 PressurePanel), OTLP/HTTP JSON ingest, JSONL scraper, hardcoded model price
 table for cost derivation when sessions don't emit `result` envelopes.
 
+**Telegram bridge** — optional. Forwards pending decisions + unread
+inbox messages from Claude Code sessions to your Telegram chat;
+routes your replies (reply-to-msg or `/answer` / `/reply` slash
+commands) back to the dashboard. Stdlib-only daemon, no
+`python-telegram-bot` dependency. `cc setup telegram` runs the
+wizard.
+
 **Tooling** — `cc` shim (`start`, `stop`, `restart`, `status`, `doctor`,
-`logs`, `setup otel`, `trigger`, `sync`), idempotent `install.sh` with
-`rsync --delete` scoped only to code dirs (your data is never touched),
-deterministic `cc doctor` health check, Playwright smoke + screenshot suites.
+`logs`, `setup otel`, `setup telegram`, `trigger`, `sync`), idempotent
+`install.sh` with `rsync --delete` scoped only to code dirs (your data
+is never touched), deterministic `cc doctor` health check, Playwright
+smoke + screenshot suites.
 
 ## Install
 
@@ -71,9 +79,9 @@ observability/         the original prompt + reference guide that drove
 
 ## Status
 
-Phase 1, the cosmetic finish, and dispatcher hardening (cost cap / risk
-gate / back-pressure) are shipped. See `CHANGELOG.md` for the full
-picture. The Telegram bridge is the only major item still deferred.
+Phase 1, the cosmetic finish, dispatcher hardening, and the Telegram
+bridge are all shipped — the original 33-panel spec + the deferred
+list are closed. See `CHANGELOG.md` for the full release log.
 
 ## License
 

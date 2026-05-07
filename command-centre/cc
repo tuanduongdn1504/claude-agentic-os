@@ -111,10 +111,23 @@ cmd_logs() {
 
 cmd_setup() {
   case "${1:-}" in
-    otel)      "$PY" "$INSTALL_DIR/scripts/setup_otel.py" "${@:2}" ;;
-    telegram)  "$PY" "$INSTALL_DIR/scripts/setup_telegram.py" "${@:2}" 2>/dev/null \
-                || echo "setup telegram not wired yet (Telegram bridge milestone)" ;;
-    *)         echo "usage: cc setup {otel|telegram}"; exit 2 ;;
+    otel)
+      "$PY" "$INSTALL_DIR/scripts/setup_otel.py" "${@:2}"
+      ;;
+    telegram)
+      shift
+      # `cc setup telegram --foreground` runs the bridge in this terminal
+      # for debugging without needing launchd. Otherwise: run the wizard.
+      if [ "${1:-}" = "--foreground" ]; then
+        shift
+        exec "$PY" "$INSTALL_DIR/scripts/telegram_bridge.py" "$@"
+      fi
+      "$PY" "$INSTALL_DIR/scripts/setup_telegram.py" "$@"
+      ;;
+    *)
+      echo "usage: cc setup {otel|telegram}"
+      exit 2
+      ;;
   esac
 }
 

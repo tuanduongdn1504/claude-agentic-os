@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.3.0 — Telegram bridge
+
+The last item from the original deferred list. Forwards pending
+`DECISION:` and unread `INBOX:` from Claude Code sessions to your
+Telegram chat; routes your replies back to the dashboard.
+
+### What it does
+
+- **Outbound** (every `TELEGRAM_NOTIFY_INTERVAL_S=30s`): polls
+  `/api/decisions?status=pending` and `/api/inbox?unread=1`, sends a
+  Markdown-formatted notification to `TELEGRAM_DASH_CHAT_ID` for any
+  item not already in `notification_log`. Stores the resulting
+  Telegram `message_id` for reply lookup.
+- **Inbound** (Telegram long-poll, 30s): receives messages, routes
+  three ways:
+  - **Reply-to-message** → look up the original notification, post to
+    `/api/decisions/{id}/answer` or `/api/inbox/{id}/reply`.
+  - **`/answer <id> <text>`** or **`/reply <id> <text>`** — escape
+    hatch for clients without reply-to.
+  - **`/help`** / **`/start`** — short usage card.
+- Each successful route gets an `✅ recorded` ack in the chat.
+
+### New files
+
+- **`scripts/telegram_bridge.py`** — single-file daemon, stdlib only
+  (no `python-telegram-bot` dep, just `urllib`). Sources `.env`
+  itself since launchd doesn't.
+- **`scripts/setup_telegram.py`** — interactive wizard. Prompts for
+  bot token, verifies via `getMe`, captures `chat_id` by long-polling
+  for the next message you send, writes to `$INSTALL_DIR/.env` with a
+  timestamped backup. Supports `--token`/`--chat`/`--dry-run`.
+- **`templates/launchd/com.commandcentre.telegram-bridge.plist.template`**
+  — picked up by `install.sh`'s existing template loop, no code
+  changes needed.
+
+### Smoke-tested end-to-end
+
+Drove the bridge against a stdlib mock Telegram API (port 8767):
+- 3 outbound notifications forwarded (2 decisions + 1 inbox);
+  re-running same tick is a no-op (dedupe via `notification_log`).
+- Reply-to-msg → `/api/decisions/11/answer` → status flips to
+  `answered`, ack sent back to chat as a reply to the original.
+- `/reply 10 got it thanks` → `/api/inbox/10/reply` → user_to_agent
+  row inserted, original marked `read=1`.
+- `/help` returns a friendly usage card.
+
+### Operator flow
+
+```bash
+cc setup telegram                   # wizard: token + chat capture
+cc setup telegram --foreground      # run bridge inline for debugging
+launchctl load ~/Library/LaunchAgents/com.commandcentre.telegram-bridge.plist
+```
+
+The bridge is a no-op (sleeps 60s/cycle) when `TELEGRAM_BOT_TOKEN` or
+`TELEGRAM_DASH_CHAT_ID` is unset, so launchd can stay loaded without
+churn even before you run the wizard.
+
+---
+
 ## v0.2.0 — dispatcher hardening
 
 Three guards land between `claim_pending` and the actual `claude -p`

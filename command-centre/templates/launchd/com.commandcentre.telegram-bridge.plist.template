@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.commandcentre.telegram-bridge</string>
+
+  <!-- install.sh `sed`s these placeholders. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{PYTHON}}</string>
+    <string>{{INSTALL_DIR}}/scripts/telegram_bridge.py</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CC_INSTALL_DIR</key>     <string>{{INSTALL_DIR}}</string>
+    <key>CC_PORT</key>            <string>{{PORT}}</string>
+    <key>CC_DASHBOARD_URL</key>   <string>http://127.0.0.1:{{PORT}}</string>
+    <!-- TELEGRAM_BOT_TOKEN and TELEGRAM_DASH_CHAT_ID come from $INSTALL_DIR/.env
+         which is sourced by the bridge process via os.environ at startup —
+         set them via `cc setup telegram` (writes .env) and then reload this
+         agent: `launchctl unload && launchctl load`. -->
+    <key>PATH</key> <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>{{INSTALL_DIR}}</string>
+
+  <key>RunAtLoad</key>      <true/>
+  <key>KeepAlive</key>      <true/>
+  <key>ThrottleInterval</key> <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>{{INSTALL_DIR}}/logs/telegram-bridge.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{INSTALL_DIR}}/logs/telegram-bridge.stderr.log</string>
+
+  <!-- Bridge reads .env directly via os.environ, but launchd doesn't auto-load
+       .env. The shim wraps the python invocation in a sourcing helper. -->
+</dict>
+</plist>
