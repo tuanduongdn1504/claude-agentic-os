@@ -71,9 +71,10 @@ observability/         the original prompt + reference guide that drove
 
 ## Status
 
-Phase 1 (this tag) ships everything above. See `CHANGELOG.md` for what's
-done and what's not — the Telegram bridge, three cosmetic panels, and the
-dispatcher hardening pass are explicitly deferred.
+Phase 1 + the cosmetic finish (sparklines, heatmap, top-skills leaderboard)
+are shipped. See `CHANGELOG.md` for the full picture. The Telegram bridge
+and the dispatcher hardening pass (cost cap / risk gate / back-pressure)
+are still deferred.
 
 ## License
 

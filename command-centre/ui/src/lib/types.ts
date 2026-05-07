@@ -231,6 +231,22 @@ export interface ScheduleRow {
 export interface SchedulesList { items: ScheduleRow[]; count: number; }
 export interface ScheduleRuns { schedule_id: number; items: TaskRow[]; }
 
+// -- Sparklines + heatmap --
+export interface Sparklines {
+  slots: string[];     // 24 strings, oldest → newest, "YYYY-MM-DD HH"
+  sessions: number[];
+  tokens: number[];
+  cost_usd: number[];
+  errors: number[];
+}
+export interface ActivityHeatmap {
+  range: string;
+  grid: number[][];    // [7][24] rows=weekday (0=Sun..6=Sat), cols=hour
+  total: number;
+  peak: number;
+  weekdays: string[];
+}
+
 // -- Firehose event --
 export interface FirehoseEvent {
   id: number; event_name: string | null; session_id: string | null;

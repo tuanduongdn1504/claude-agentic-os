@@ -3,6 +3,7 @@ import { MCPPanel } from '@/components/panels/MCPPanel';
 import { SkillsRegistry } from '@/components/panels/SkillsRegistry';
 import { ContextHealthCard } from '@/components/panels/ContextHealthCard';
 import { SkillCostCard } from '@/components/panels/SkillCostCard';
+import { TopSkillsCard } from '@/components/panels/TopSkillsCard';
 
 export default function SkillsPage() {
   return (
@@ -20,7 +21,10 @@ export default function SkillsPage() {
       </CollapsibleSection>
 
       <CollapsibleSection id="skills-economics" title="Skill economics" subtitle="tokens + cost per skill">
-        <SkillCostCard />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 grid-match">
+          <SkillCostCard />
+          <TopSkillsCard />
+        </div>
       </CollapsibleSection>
     </div>
   );

@@ -1,12 +1,12 @@
 // Typed fetch wrappers over /api/*.
 
 import type {
-  AgentFanout, AttentionFeed, ContextHealth, DecisionsList, EditDecisions,
-  FirehoseEvent, HookActivity, InboxList, LiveSessionsList, LiveSessionState,
-  McpServers, McpTools, ProjectBreakdown, Productivity, SchedulesList,
-  ScheduleRuns, SessionDetails, SessionFailure, SessionList, SessionOutcomes,
-  SkillsEconomics, SkillsList, Summary, SystemHealth, SystemPressure, TasksList,
-  ToolLatency, UsageCache, UsageTokens,
+  ActivityHeatmap, AgentFanout, AttentionFeed, ContextHealth, DecisionsList,
+  EditDecisions, FirehoseEvent, HookActivity, InboxList, LiveSessionsList,
+  LiveSessionState, McpServers, McpTools, ProjectBreakdown, Productivity,
+  SchedulesList, ScheduleRuns, SessionDetails, SessionFailure, SessionList,
+  SessionOutcomes, SkillsEconomics, SkillsList, Sparklines, Summary,
+  SystemHealth, SystemPressure, TasksList, ToolLatency, UsageCache, UsageTokens,
 } from './types';
 
 export type Range = 'today' | '7d' | '30d';
@@ -73,6 +73,8 @@ export const getProjectBreakdown = (range: Range = '7d') => j<ProjectBreakdown>(
 export const getAgentFanout = (range: Range = '7d') => j<AgentFanout>(`/api/tools/agent-fanout?range=${range}`);
 export const getEditDecisions = (range: Range = '7d') => j<EditDecisions>(`/api/tools/edit-decisions?range=${range}`);
 export const getProductivity = (range: Range = '7d') => j<Productivity>(`/api/activity/productivity?range=${range}`);
+export const getSummarySparklines = () => j<Sparklines>('/api/summary/sparklines');
+export const getActivityHeatmap = (range: Range = '30d') => j<ActivityHeatmap>(`/api/activity/heatmap?range=${range}`);
 
 // -- MCP --
 export const getMcpServers = (range: Range = '7d') => j<McpServers>(`/api/mcp?range=${range}`);

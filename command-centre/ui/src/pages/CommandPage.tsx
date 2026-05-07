@@ -19,6 +19,7 @@ import { TaskComposer } from '@/components/panels/TaskComposer';
 import { SchedulesCard } from '@/components/panels/SchedulesCard';
 import { DecisionsCard } from '@/components/panels/DecisionsCard';
 import { InboxCard } from '@/components/panels/InboxCard';
+import { HeatmapGrid } from '@/components/panels/HeatmapGrid';
 
 export default function CommandPage() {
   const [composerOpen, setComposerOpen] = useState(false);
@@ -74,6 +75,10 @@ export default function CommandPage() {
           <EditAcceptanceCard />
           <ProductivityCard />
         </div>
+      </CollapsibleSection>
+
+      <CollapsibleSection id="observability-rhythm" title="Observability · rhythm" subtitle="when you actually work">
+        <HeatmapGrid />
       </CollapsibleSection>
 
       <CollapsibleSection id="system-pressure" title="System pressure" subtitle="retries · compactions · api_errors">

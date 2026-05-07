@@ -434,3 +434,127 @@ async def productivity(range: str = "7d") -> dict[str, Any]:
         "totals": totals,
         "note": "values are delta-counters — SUM(value) is correct",
     }
+
+
+# ---------------------------------------------------------------------------
+# /api/summary/sparklines — last 24 hourly buckets for the four KPIs
+# ---------------------------------------------------------------------------
+
+@router.get("/api/summary/sparklines")
+async def summary_sparklines() -> dict[str, Any]:
+    """24 hourly bins (oldest first) for the four KPI tiles.
+
+    Buckets aligned to local-time hour boundaries. Sparklines aren't a
+    real time-series so a missing hour reads as zero — fine because UI
+    just plots them as a tiny line.
+    """
+    with db.connect() as conn:
+        # Sessions — start hour of each session in the last 24h.
+        sessions = conn.execute(
+            """
+            SELECT strftime('%Y-%m-%d %H', started_at, 'localtime') AS hr,
+                   COUNT(*) AS n
+            FROM sessions
+            WHERE started_at >= datetime('now', '-24 hours')
+              AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY hr
+            """
+        ).fetchall()
+        tokens = conn.execute(
+            """
+            SELECT strftime('%Y-%m-%d %H', started_at, 'localtime') AS hr,
+                   COALESCE(SUM(input_tokens + output_tokens), 0) AS n
+            FROM sessions
+            WHERE started_at >= datetime('now', '-24 hours')
+              AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY hr
+            """
+        ).fetchall()
+        cost = conn.execute(
+            """
+            SELECT strftime('%Y-%m-%d %H', started_at, 'localtime') AS hr,
+                   COALESCE(SUM(cost_usd), 0) AS n
+            FROM sessions
+            WHERE started_at >= datetime('now', '-24 hours')
+              AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY hr
+            """
+        ).fetchall()
+        errors = conn.execute(
+            """
+            SELECT strftime('%Y-%m-%d %H', started_at, 'localtime') AS hr,
+                   COALESCE(SUM(error_count), 0) AS n
+            FROM sessions
+            WHERE started_at >= datetime('now', '-24 hours')
+              AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY hr
+            """
+        ).fetchall()
+
+    # Build the 24 slot index from now backwards (local time).
+    import datetime as _dt
+    now = _dt.datetime.now()
+    slots = [
+        (now - _dt.timedelta(hours=h)).strftime("%Y-%m-%d %H")
+        for h in range(23, -1, -1)
+    ]
+
+    def _series(rows: list) -> list[float]:
+        idx = {r["hr"]: r["n"] for r in rows}
+        return [float(idx.get(s, 0) or 0) for s in slots]
+
+    return {
+        "slots": slots,  # 24 hour-strings, oldest → newest
+        "sessions": _series(sessions),
+        "tokens":   _series(tokens),
+        "cost_usd": _series(cost),
+        "errors":   _series(errors),
+    }
+
+
+# ---------------------------------------------------------------------------
+# /api/activity/heatmap — 7×24 grid (day-of-week × hour-of-day)
+# ---------------------------------------------------------------------------
+
+@router.get("/api/activity/heatmap")
+async def activity_heatmap(range: str = "30d") -> dict[str, Any]:
+    """Aggregate session count by (weekday, hour-of-day) for the range.
+
+    weekday: 0=Sunday … 6=Saturday (sqlite strftime('%w')).
+    hour: 0..23 local time.
+    Returns a 7×24 grid (rows=weekday, cols=hour).
+    """
+    pred, params = timerange.sql_predicate(range, "started_at")
+    with db.connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT CAST(strftime('%w', started_at, 'localtime') AS INTEGER) AS dow,
+                   CAST(strftime('%H', started_at, 'localtime') AS INTEGER) AS hr,
+                   COUNT(*) AS n
+            FROM sessions
+            WHERE {pred}
+              AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY dow, hr
+            """,
+            params,
+        ).fetchall()
+
+    # Note: `range` is the request parameter here, so don't call range() —
+    # use a fixed 7-tuple to build the empty grid.
+    grid: list[list[int]] = [[0] * 24 for _ in (0, 1, 2, 3, 4, 5, 6)]
+    total = 0
+    peak = 0
+    for r in rows:
+        dow = int(r["dow"]); hr = int(r["hr"]); n = int(r["n"])
+        if 0 <= dow < 7 and 0 <= hr < 24:
+            grid[dow][hr] = n
+            total += n
+            if n > peak:
+                peak = n
+    return {
+        "range": timerange.normalize(range),
+        "grid": grid,    # 7 rows × 24 cols
+        "total": total,
+        "peak": peak,    # largest single-cell count for color scaling
+        "weekdays": ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    }

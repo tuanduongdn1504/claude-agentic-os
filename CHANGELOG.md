@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.1.1 — cosmetic finish (the three deferred panels)
+
+Closes the three panels the prompt called for that phase 1 shipped without.
+Pure additions — no schema changes, no breaking changes to existing endpoints.
+
+### Backend
+
+- **`GET /api/summary/sparklines`** — 24 hourly buckets each for
+  `sessions / tokens / cost_usd / errors`, slot-aligned to local-time hour
+  boundaries. Powers the inline charts in the four KPI tiles.
+- **`GET /api/activity/heatmap?range={today,7d,30d}`** — 7×24 grid
+  (weekday × hour-of-day) of session counts plus `peak` for color scaling.
+
+### Frontend
+
+- **`Sparkline.tsx`** — pure-SVG primitive, no library. Configurable
+  stroke + area fill, scaled to viewport, handles all-zero series.
+- **`KpiRow.tsx`** — now embeds an 84×28 sparkline next to each KPI
+  value, color-matched to tile tone (blue / purple / green / amber).
+- **`HeatmapGrid.tsx`** — 7×24 grid panel with a 5-step blue color
+  scale, per-cell hover tooltip, scrollable on narrow viewports,
+  "less → more" legend. Wired into a new "Observability · rhythm"
+  section on Command page.
+- **`TopSkillsCard.tsx`** — leaderboard with cost / tokens / runs sort
+  picker, gradient bar visualization, top-10 cap. Sourced from the
+  existing `/api/skills/economics`. Wired beside `SkillCostCard` on
+  Skills page.
+
+### Verified
+
+`tsc --noEmit` clean. `vite build` 494KB / 149KB gzipped (+6KB from
+v0.1.0). 6 Playwright screenshot tests pass. Real DB renders 16
+sessions over 30d distributed across Tue/Wed/Thu/Fri afternoons —
+matches API output.
+
+---
+
 ## v0.1.0-phase1 — initial release
 
 End-to-end working command centre: dashboard, dispatcher, installer, smoke

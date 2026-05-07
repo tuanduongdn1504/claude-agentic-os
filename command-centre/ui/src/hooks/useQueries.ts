@@ -37,6 +37,10 @@ export const useEditDecisions = (range: Range) =>
   useQuery({ queryKey: ['edit-decisions', range], queryFn: () => api.getEditDecisions(range), refetchInterval: POLL_30S });
 export const useProductivity = (range: Range) =>
   useQuery({ queryKey: ['productivity', range], queryFn: () => api.getProductivity(range), refetchInterval: POLL_30S });
+export const useSummarySparklines = () =>
+  useQuery({ queryKey: ['summary-sparklines'], queryFn: api.getSummarySparklines, refetchInterval: POLL_30S });
+export const useActivityHeatmap = (range: Range = '30d') =>
+  useQuery({ queryKey: ['activity-heatmap', range], queryFn: () => api.getActivityHeatmap(range), refetchInterval: POLL_30S });
 
 // -- Sessions --
 export const useSessions = (range: Range = '7d') =>
