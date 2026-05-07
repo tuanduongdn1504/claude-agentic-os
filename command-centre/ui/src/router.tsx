@@ -5,6 +5,8 @@ import { AppShell } from '@/components/layout/AppShell';
 import CommandPage from '@/pages/CommandPage';
 import ActivityPage from '@/pages/ActivityPage';
 import SkillsPage from '@/pages/SkillsPage';
+import SessionsPage from '@/pages/SessionsPage';
+import DecisionsPage from '@/pages/DecisionsPage';
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -37,7 +39,19 @@ const skillsRoute = createRoute({
   component: SkillsPage,
 });
 
-const routeTree = rootRoute.addChildren([commandRoute, activityRoute, skillsRoute]);
+const sessionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/sessions',
+  component: SessionsPage,
+});
+
+const decisionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/decisions',
+  component: DecisionsPage,
+});
+
+const routeTree = rootRoute.addChildren([commandRoute, activityRoute, skillsRoute, sessionsRoute, decisionsRoute]);
 
 export const router = createRouter({
   routeTree,

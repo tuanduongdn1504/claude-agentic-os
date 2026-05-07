@@ -6,8 +6,8 @@ import type {
   LiveSessionsList, LiveSessionState, McpServers, McpTools, ProjectBreakdown,
   Productivity, SchedulesList, ScheduleRuns, SessionDetails, SessionFailure,
   SessionList, SessionOutcomes, SkillsEconomics, SkillsList, Sparklines,
-  Summary, SystemHealth, SystemPressure, TasksList, ToolLatency, UsageCache,
-  UsageTokens,
+  Summary, SystemHealth, SystemPressure, TasksList, TelegramStatus, ToolLatency,
+  UsageCache, UsageTokens,
 } from './types';
 
 export type Range = 'today' | '7d' | '30d';
@@ -43,6 +43,7 @@ export const getSystemHealth = () => j<SystemHealth>('/api/system/health');
 export const getAttention = () => j<AttentionFeed>('/api/attention');
 export const getSystemPressure = () => j<SystemPressure>('/api/system/pressure');
 export const getDispatcherState = () => j<DispatcherState>('/api/system/dispatcher');
+export const getTelegramStatus = () => j<TelegramStatus>('/api/system/telegram');
 export const postSync = () =>
   j<{ sessions: unknown; cowork: unknown; skills: unknown }>('/api/sync', { method: 'POST' });
 export const emergencyStop = () =>

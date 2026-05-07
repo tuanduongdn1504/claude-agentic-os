@@ -19,6 +19,8 @@ export const useSystemPressure = () =>
   useQuery({ queryKey: ['system-pressure'], queryFn: api.getSystemPressure, refetchInterval: POLL_30S });
 export const useDispatcherState = () =>
   useQuery({ queryKey: ['dispatcher-state'], queryFn: api.getDispatcherState, refetchInterval: POLL_10S });
+export const useTelegramStatus = () =>
+  useQuery({ queryKey: ['telegram-status'], queryFn: api.getTelegramStatus, refetchInterval: POLL_30S });
 
 // -- Observability --
 export const useUsageTokens = (range: Range) =>

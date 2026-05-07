@@ -257,6 +257,99 @@ async def system_dispatcher() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# /api/system/telegram — bridge health + notification stats
+# ---------------------------------------------------------------------------
+
+@router.get("/api/system/telegram")
+async def system_telegram() -> dict[str, Any]:
+    """Bridge process status + notification_log stats over the last 24h.
+
+    The bridge daemon doesn't write a DB heartbeat, so liveness comes from
+    pgrep + stdout log mtime. Errors come from tailing the stderr log.
+    Token is never exposed — only its presence."""
+    import subprocess
+
+    chat_id = os.environ.get("TELEGRAM_DASH_CHAT_ID", "").strip()
+    token_set = bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip())
+
+    pid: int | None = None
+    alive = False
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "telegram_bridge.py"],
+            capture_output=True, text=True, timeout=2,
+        )
+        first = (out.stdout or "").strip().split("\n")[0]
+        if first.isdigit():
+            pid = int(first)
+            alive = True
+    except Exception:
+        pass
+
+    last_outbound_at: str | None = None
+    notified_24h = 0
+    by_type: dict[str, int] = {}
+    if chat_id:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(sent_at) AS last FROM notification_log WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            last_outbound_at = row["last"] if row and row["last"] else None
+            notified_24h = int(conn.execute(
+                "SELECT COUNT(*) AS n FROM notification_log "
+                "WHERE chat_id = ? AND sent_at >= datetime('now', '-24 hours')",
+                (chat_id,),
+            ).fetchone()["n"])
+            for r in conn.execute(
+                "SELECT event_type, COUNT(*) AS n FROM notification_log "
+                "WHERE chat_id = ? AND sent_at >= datetime('now', '-24 hours') "
+                "GROUP BY event_type",
+                (chat_id,),
+            ):
+                by_type[r["event_type"]] = int(r["n"])
+
+    log_dir = Path(os.environ.get("CC_LOG_DIR") or (Path.home() / ".command-centre" / "logs"))
+    stdout_log = log_dir / "telegram-bridge.stdout.log"
+    stderr_log = log_dir / "telegram-bridge.stderr.log"
+    log_mtime_age_s: float | None = None
+    try:
+        log_mtime_age_s = max(0.0, time.time() - stdout_log.stat().st_mtime)
+    except OSError:
+        pass
+
+    last_error: str | None = None
+    last_error_at: str | None = None
+    try:
+        size = stderr_log.stat().st_size
+        if size > 0:
+            with stderr_log.open("rb") as f:
+                f.seek(-min(4096, size), 2)
+                tail = f.read().decode("utf-8", errors="replace")
+            lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+            if lines:
+                last_error = lines[-1][:240]
+                from datetime import datetime as _dt
+                last_error_at = _dt.fromtimestamp(stderr_log.stat().st_mtime).isoformat(timespec="seconds")
+    except OSError:
+        pass
+
+    return {
+        "configured": token_set and bool(chat_id),
+        "alive": alive,
+        "pid": pid,
+        "chat_id_set": bool(chat_id),
+        "token_set": token_set,
+        "last_outbound_at": last_outbound_at,
+        "notified_24h": notified_24h,
+        "notified_24h_by_type": by_type,
+        "stdout_log_mtime_age_s": round(log_mtime_age_s, 1) if log_mtime_age_s is not None else None,
+        "last_error": last_error,
+        "last_error_at": last_error_at,
+    }
+
+
+# ---------------------------------------------------------------------------
 # /api/attention — aggregated issue feed
 # ---------------------------------------------------------------------------
 

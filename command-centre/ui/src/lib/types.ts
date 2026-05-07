@@ -231,6 +231,21 @@ export interface ScheduleRow {
 export interface SchedulesList { items: ScheduleRow[]; count: number; }
 export interface ScheduleRuns { schedule_id: number; items: TaskRow[]; }
 
+// -- Telegram bridge status --
+export interface TelegramStatus {
+  configured: boolean;
+  alive: boolean;
+  pid: number | null;
+  chat_id_set: boolean;
+  token_set: boolean;
+  last_outbound_at: string | null;
+  notified_24h: number;
+  notified_24h_by_type: Record<string, number>;
+  stdout_log_mtime_age_s: number | null;
+  last_error: string | null;
+  last_error_at: string | null;
+}
+
 // -- Dispatcher hardening state --
 export interface DispatcherState {
   max_concurrent: number;
