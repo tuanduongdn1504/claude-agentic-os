@@ -17,6 +17,8 @@ export const useAttention = () =>
   useQuery({ queryKey: ['attention'], queryFn: api.getAttention, refetchInterval: POLL_10S });
 export const useSystemPressure = () =>
   useQuery({ queryKey: ['system-pressure'], queryFn: api.getSystemPressure, refetchInterval: POLL_30S });
+export const useDispatcherState = () =>
+  useQuery({ queryKey: ['dispatcher-state'], queryFn: api.getDispatcherState, refetchInterval: POLL_10S });
 
 // -- Observability --
 export const useUsageTokens = (range: Range) =>

@@ -15,6 +15,7 @@ import { ProductivityCard } from '@/components/panels/ProductivityCard';
 import { PressurePanel } from '@/components/panels/PressurePanel';
 import { LiveSessionsCard } from '@/components/panels/LiveSessionsCard';
 import { TaskBoard } from '@/components/panels/TaskBoard';
+import { DispatcherStrip } from '@/components/panels/DispatcherStrip';
 import { TaskComposer } from '@/components/panels/TaskComposer';
 import { SchedulesCard } from '@/components/panels/SchedulesCard';
 import { DecisionsCard } from '@/components/panels/DecisionsCard';
@@ -46,6 +47,7 @@ export default function CommandPage() {
       </CollapsibleSection>
 
       <CollapsibleSection id="mission-control" title="Mission Control" subtitle="tasks + schedules" defaultOpen>
+        <DispatcherStrip />
         <TaskBoard />
         <SchedulesCard />
       </CollapsibleSection>

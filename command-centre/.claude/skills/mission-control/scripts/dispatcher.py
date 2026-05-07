@@ -61,6 +61,19 @@ DASHBOARD_URL = (
     or f"http://{os.environ.get('CC_HOST', '127.0.0.1')}:{os.environ.get('CC_PORT', '8765')}"
 )
 
+# Hardening guards (v0.2.0). 0 / unset = disabled.
+def _f(name: str, default: float = 0.0) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+DAILY_COST_CAP_USD = _f("MISSION_CONTROL_DAILY_COST_CAP_USD", 0.0)
+HARD_RISK_GATE = os.environ.get("MISSION_CONTROL_HARD_RISK_GATE", "1") not in ("0", "false", "no")
+
 
 # -- Env for spawned children -------------------------------------------
 
@@ -450,15 +463,49 @@ def _run_stream(task: dict) -> dict:
 
 # -- Orchestration ------------------------------------------------------
 
+def _running_count() -> int:
+    """How many ops_tasks are currently in 'running' state."""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM ops_tasks WHERE status='running'"
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+def _today_cost_usd() -> float:
+    """Sum of cost_usd for tasks started today (local time)."""
+    with db.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COALESCE(SUM(cost_usd), 0) AS s
+            FROM ops_tasks
+            WHERE cost_usd IS NOT NULL
+              AND started_at IS NOT NULL
+              AND DATE(started_at, 'localtime') = DATE('now', 'localtime')
+            """
+        ).fetchone()
+        return float(row["s"]) if row else 0.0
+
+
 def run_once(verbose: bool = False) -> dict[str, int]:
     """One sweep. Safe to call from heartbeat OR manual `--once`.
 
     Doesn't actually block on long-running tasks in `classic` mode — but
     it does block on `stream` for the duration of the session (with the
     timeout cap). In practice that's fine because MAX_CONCURRENT keeps
-    us from starving the heartbeat cadence."""
-    stats = {"claimed": 0, "auto": 0, "promoted_for_approval": 0,
-             "succeeded": 0, "failed": 0, "swept_pids": 0}
+    us from starving the heartbeat cadence.
+
+    Hardening guards (v0.2.0):
+    - Back-pressure: cap concurrent runs at MAX_CONCURRENT
+    - Daily cost cap: refuse to dispatch when today's spend ≥ DAILY_COST_CAP_USD
+    - Hard risk gate: promote risk=high tasks to awaiting_approval if they
+      were misconfigured with requires_approval=False
+    """
+    stats: dict[str, int] = {
+        "claimed": 0, "auto": 0, "promoted_for_approval": 0,
+        "succeeded": 0, "failed": 0, "swept_pids": 0,
+        "risk_gated": 0, "back_pressure": 0, "cost_capped": 0,
+    }
     stats["swept_pids"] = _sweep_stale_pids()
 
     if _emergency_stop_engaged():
@@ -466,10 +513,57 @@ def run_once(verbose: bool = False) -> dict[str, int]:
             print("[dispatcher] emergency_stop engaged — not dispatching")
         return stats
 
-    claimed = task_tracker.claim_pending(max_rows=MAX_CONCURRENT)
+    # Guard 1: back-pressure. Free slots = MAX_CONCURRENT − currently running.
+    running = _running_count()
+    slots = max(0, MAX_CONCURRENT - running)
+    if slots == 0:
+        stats["back_pressure"] = 1
+        task_tracker.log_activity(
+            "dispatcher_back_pressure",
+            f"running={running} max={MAX_CONCURRENT}",
+            metadata={"running": running, "max_concurrent": MAX_CONCURRENT},
+        )
+        if verbose:
+            print(f"[dispatcher] back-pressure: {running}/{MAX_CONCURRENT} running")
+        return stats
+
+    # Guard 2: daily cost cap. Off when DAILY_COST_CAP_USD == 0.
+    if DAILY_COST_CAP_USD > 0:
+        today = _today_cost_usd()
+        if today >= DAILY_COST_CAP_USD:
+            stats["cost_capped"] = 1
+            task_tracker.log_activity(
+                "dispatcher_cost_capped",
+                f"today=${today:.2f} cap=${DAILY_COST_CAP_USD:.2f}",
+                metadata={"today_cost_usd": today, "cap_usd": DAILY_COST_CAP_USD},
+            )
+            if verbose:
+                print(f"[dispatcher] cost-capped: ${today:.2f} ≥ ${DAILY_COST_CAP_USD:.2f}")
+            return stats
+
+    claimed = task_tracker.claim_pending(max_rows=slots)
     stats["claimed"] = len(claimed)
 
     for task in claimed:
+        # Guard 3: hard risk gate. risk=high MUST require approval — even
+        # if the task was created with requires_approval=False (treated as
+        # operator misconfiguration). Promote BEFORE skill auto-assign so
+        # operator sees the raw task as queued it.
+        risk = (task.get("risk_level") or "").lower()
+        if HARD_RISK_GATE and risk == "high" and not task.get("requires_approval"):
+            task_tracker.update_task(
+                task["id"], status="awaiting_approval",
+                started_at=None, requires_approval=1,
+            )
+            stats["risk_gated"] += 1
+            stats["promoted_for_approval"] += 1
+            task_tracker.log_activity(
+                "task_risk_gated",
+                f"task_id={task['id']} risk=high requires_approval=False → promoted",
+                metadata={"task_id": task["id"], "risk_level": "high"},
+            )
+            continue
+
         # Auto-assign a skill if missing.
         if not task.get("assigned_skill"):
             picked = skill_router.pick(task.get("title") or "", task.get("description"))

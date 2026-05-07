@@ -71,10 +71,9 @@ observability/         the original prompt + reference guide that drove
 
 ## Status
 
-Phase 1 + the cosmetic finish (sparklines, heatmap, top-skills leaderboard)
-are shipped. See `CHANGELOG.md` for the full picture. The Telegram bridge
-and the dispatcher hardening pass (cost cap / risk gate / back-pressure)
-are still deferred.
+Phase 1, the cosmetic finish, and dispatcher hardening (cost cap / risk
+gate / back-pressure) are shipped. See `CHANGELOG.md` for the full
+picture. The Telegram bridge is the only major item still deferred.
 
 ## License
 

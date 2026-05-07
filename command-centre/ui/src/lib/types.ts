@@ -231,6 +231,19 @@ export interface ScheduleRow {
 export interface SchedulesList { items: ScheduleRow[]; count: number; }
 export interface ScheduleRuns { schedule_id: number; items: TaskRow[]; }
 
+// -- Dispatcher hardening state --
+export interface DispatcherState {
+  max_concurrent: number;
+  running: number;
+  free_slots: number;
+  back_pressure: boolean;
+  daily_cost_cap_usd: number | null;
+  today_cost_usd: number;
+  cost_capped: boolean;
+  hard_risk_gate: boolean;
+  risk_gated_today: number;
+}
+
 // -- Sparklines + heatmap --
 export interface Sparklines {
   slots: string[];     // 24 strings, oldest → newest, "YYYY-MM-DD HH"

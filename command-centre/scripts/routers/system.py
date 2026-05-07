@@ -196,6 +196,67 @@ async def emergency_resume() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# /api/system/dispatcher — live caps + usage for the hardening guards
+# ---------------------------------------------------------------------------
+
+@router.get("/api/system/dispatcher")
+async def system_dispatcher() -> dict[str, Any]:
+    """Live snapshot of the dispatcher's hardening state.
+
+    Caps come from env (MAX_CONCURRENT / DAILY_COST_CAP_USD / HARD_RISK_GATE);
+    usage is computed from ops_tasks. UI uses this to show 'used / cap'.
+    """
+    def _f(name: str, default: float = 0.0) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+
+    max_concurrent = int(os.environ.get("MISSION_CONTROL_MAX_CONCURRENT") or 3)
+    daily_cap = _f("MISSION_CONTROL_DAILY_COST_CAP_USD", 0.0)
+    hard_risk_gate = os.environ.get("MISSION_CONTROL_HARD_RISK_GATE", "1") not in ("0", "false", "no")
+
+    with db.connect() as conn:
+        running = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM ops_tasks WHERE status='running'"
+        ).fetchone()["n"])
+        today_cost = float(conn.execute(
+            """
+            SELECT COALESCE(SUM(cost_usd), 0) AS s
+            FROM ops_tasks
+            WHERE cost_usd IS NOT NULL
+              AND started_at IS NOT NULL
+              AND DATE(started_at, 'localtime') = DATE('now', 'localtime')
+            """
+        ).fetchone()["s"])
+        risk_gated_today = int(conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM activities
+            WHERE event_type='task_risk_gated'
+              AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
+            """
+        ).fetchone()["n"])
+
+    back_pressure = running >= max_concurrent
+    cost_capped = daily_cap > 0 and today_cost >= daily_cap
+
+    return {
+        "max_concurrent": max_concurrent,
+        "running": running,
+        "free_slots": max(0, max_concurrent - running),
+        "back_pressure": back_pressure,
+        "daily_cost_cap_usd": daily_cap if daily_cap > 0 else None,
+        "today_cost_usd": today_cost,
+        "cost_capped": cost_capped,
+        "hard_risk_gate": hard_risk_gate,
+        "risk_gated_today": risk_gated_today,
+    }
+
+
+# ---------------------------------------------------------------------------
 # /api/attention — aggregated issue feed
 # ---------------------------------------------------------------------------
 
@@ -253,6 +314,42 @@ async def attention() -> dict[str, Any]:
             issues.append({"kind": "schedule_overdue", "severity": "warn",
                            "schedule_id": r["id"], "name": r["name"],
                            "next_run_at": r["next_run_at"]})
+
+        # Hardening: back-pressure (running == max_concurrent).
+        try:
+            max_concurrent = int(os.environ.get("MISSION_CONTROL_MAX_CONCURRENT") or 3)
+        except ValueError:
+            max_concurrent = 3
+        running = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM ops_tasks WHERE status='running'"
+        ).fetchone()["n"])
+        if running >= max_concurrent:
+            issues.append({
+                "kind": "back_pressure", "severity": "warn",
+                "running": running, "max_concurrent": max_concurrent,
+            })
+
+        # Hardening: daily cost cap reached.
+        try:
+            cap = float(os.environ.get("MISSION_CONTROL_DAILY_COST_CAP_USD") or 0)
+        except ValueError:
+            cap = 0.0
+        if cap > 0:
+            today_cost = float(conn.execute(
+                """
+                SELECT COALESCE(SUM(cost_usd), 0) AS s
+                FROM ops_tasks
+                WHERE cost_usd IS NOT NULL
+                  AND started_at IS NOT NULL
+                  AND DATE(started_at, 'localtime') = DATE('now', 'localtime')
+                """
+            ).fetchone()["s"])
+            if today_cost >= cap:
+                issues.append({
+                    "kind": "cost_capped", "severity": "error",
+                    "today_cost_usd": today_cost, "cap_usd": cap,
+                })
+
     return {"issues": issues, "count": len(issues)}
 
 

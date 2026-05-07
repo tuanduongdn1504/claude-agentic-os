@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.2.0 — dispatcher hardening
+
+Three guards land between `claim_pending` and the actual `claude -p`
+invocation. Without these, a runaway loop or a misconfigured high-risk
+task could rack up real money or fire-and-forget on production
+infrastructure. With them, the dispatcher fails closed.
+
+### Backend
+
+- **Back-pressure** (`MISSION_CONTROL_MAX_CONCURRENT`, default `3`).
+  `run_once` counts `ops_tasks WHERE status='running'` first; new claims
+  are deferred when the slot count is full. Logs `dispatcher_back_pressure`
+  to `activities`. AttentionBar surfaces a `back_pressure` issue.
+- **Daily cost cap** (`MISSION_CONTROL_DAILY_COST_CAP_USD`, default
+  unset = off). Sums `cost_usd` across today's tasks and refuses to
+  dispatch when the cap is reached. Logs `dispatcher_cost_capped`.
+  AttentionBar surfaces a `cost_capped` issue (severity `error`).
+- **Hard risk gate** (`MISSION_CONTROL_HARD_RISK_GATE`, default on).
+  Tasks created with `risk_level='high'` AND `requires_approval=False`
+  are auto-promoted to `awaiting_approval` at claim time and never
+  auto-dispatch. Treats the misconfiguration as operator error, not
+  intent. Logs `task_risk_gated`.
+
+### New endpoint
+
+- **`GET /api/system/dispatcher`** — live snapshot:
+  ```
+  { max_concurrent, running, free_slots, back_pressure,
+    daily_cost_cap_usd, today_cost_usd, cost_capped,
+    hard_risk_gate, risk_gated_today }
+  ```
+
+### Frontend
+
+- **`DispatcherStrip.tsx`** — one-line strip above the TaskBoard
+  showing `slots running/max`, `today $cost / cap $cap` (or "no cap"),
+  and `risk gate on/off · N gated today`. Color tones: idle / info /
+  warn / error track the underlying state. Polls every 10s.
+
+### Verified
+
+All three guards smoke-tested end-to-end against a real fake-claude:
+- Risk gate: `risk=high, requires_approval=false` → task #11 promoted
+  to `awaiting_approval`, `risk_gated_today: 1` increments.
+- Back-pressure: 3 phantom running rows → `claimed=0, back_pressure=1`,
+  AttentionBar issue surfaced.
+- Cost cap: $5 spent today, cap=$4.99 → `claimed=0, cost_capped=1`,
+  AttentionBar shows red `cost_capped` issue.
+
+Stats payload from `run_once` now includes per-guard counters so launchd
+logs make it obvious why a tick was a no-op.
+
+---
+
 ## v0.1.1 — cosmetic finish (the three deferred panels)
 
 Closes the three panels the prompt called for that phase 1 shipped without.

@@ -2,11 +2,12 @@
 
 import type {
   ActivityHeatmap, AgentFanout, AttentionFeed, ContextHealth, DecisionsList,
-  EditDecisions, FirehoseEvent, HookActivity, InboxList, LiveSessionsList,
-  LiveSessionState, McpServers, McpTools, ProjectBreakdown, Productivity,
-  SchedulesList, ScheduleRuns, SessionDetails, SessionFailure, SessionList,
-  SessionOutcomes, SkillsEconomics, SkillsList, Sparklines, Summary,
-  SystemHealth, SystemPressure, TasksList, ToolLatency, UsageCache, UsageTokens,
+  DispatcherState, EditDecisions, FirehoseEvent, HookActivity, InboxList,
+  LiveSessionsList, LiveSessionState, McpServers, McpTools, ProjectBreakdown,
+  Productivity, SchedulesList, ScheduleRuns, SessionDetails, SessionFailure,
+  SessionList, SessionOutcomes, SkillsEconomics, SkillsList, Sparklines,
+  Summary, SystemHealth, SystemPressure, TasksList, ToolLatency, UsageCache,
+  UsageTokens,
 } from './types';
 
 export type Range = 'today' | '7d' | '30d';
@@ -41,6 +42,7 @@ export const getSummary = () => j<Summary>('/api/summary');
 export const getSystemHealth = () => j<SystemHealth>('/api/system/health');
 export const getAttention = () => j<AttentionFeed>('/api/attention');
 export const getSystemPressure = () => j<SystemPressure>('/api/system/pressure');
+export const getDispatcherState = () => j<DispatcherState>('/api/system/dispatcher');
 export const postSync = () =>
   j<{ sessions: unknown; cowork: unknown; skills: unknown }>('/api/sync', { method: 'POST' });
 export const emergencyStop = () =>
