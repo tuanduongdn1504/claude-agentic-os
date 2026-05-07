@@ -135,6 +135,10 @@ cmd_trigger() {
   command -v curl >/dev/null && curl -sS -X POST "http://$HOST:$PORT/api/dispatcher/trigger"; echo
 }
 
+cmd_backup() {
+  CC_INSTALL_DIR="$INSTALL_DIR" exec "$INSTALL_DIR/bin/cc-backup" "$@"
+}
+
 cmd_version() { echo "command-centre · dev"; }
 
 case "${1:-}" in
@@ -147,6 +151,7 @@ case "${1:-}" in
   logs)    shift; cmd_logs "$@" ;;
   setup)   shift; cmd_setup "$@" ;;
   trigger) shift; cmd_trigger "$@" ;;
+  backup)  shift; cmd_backup "$@" ;;
   version) shift; cmd_version ;;
   ""|-h|--help|help)
     cat <<EOF
@@ -159,6 +164,7 @@ cc — Command Centre launcher
   cc doctor              deterministic health check
   cc sync                sync_sessions --full
   cc logs [N]            tail server + mission-control logs (default 50)
+  cc backup              snapshot DB + .env to ~/Backups/command-centre/
   cc setup otel          re-run OTEL wizard
   cc setup telegram      re-run Telegram wizard (stub)
   cc trigger             POST /api/dispatcher/trigger

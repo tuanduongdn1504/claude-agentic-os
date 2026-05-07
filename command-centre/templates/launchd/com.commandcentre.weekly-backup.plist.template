@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.commandcentre.weekly-backup</string>
+
+  <!-- Calls cc-backup directly (not via the cc shim) for a leaner startup
+       path — backup just needs CC_INSTALL_DIR set. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{INSTALL_DIR}}/bin/cc-backup</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CC_INSTALL_DIR</key>
+    <string>{{INSTALL_DIR}}</string>
+    <key>CC_BACKUP_DIR</key>
+    <string>{{HOME}}/Backups/command-centre</string>
+    <!-- Keep this many tarballs (default 12 = 3 months at weekly cadence). -->
+    <key>CC_BACKUP_RETENTION</key>
+    <string>12</string>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <!-- Sunday 03:00 local time. launchd catches up missed runs after wake. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>0</integer>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>{{INSTALL_DIR}}/logs/weekly-backup.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{INSTALL_DIR}}/logs/weekly-backup.stderr.log</string>
+</dict>
+</plist>

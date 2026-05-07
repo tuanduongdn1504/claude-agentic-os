@@ -135,6 +135,10 @@ rsync -a \
 cp -f "$REPO_DIR/requirements.txt" "$INSTALL_DIR/"
 cp -f "$REPO_DIR/cc"               "$INSTALL_DIR/bin/cc"
 chmod +x "$INSTALL_DIR/bin/cc"
+if [ -f "$REPO_DIR/cc-backup" ]; then
+  cp -f "$REPO_DIR/cc-backup"      "$INSTALL_DIR/bin/cc-backup"
+  chmod +x "$INSTALL_DIR/bin/cc-backup"
+fi
 [ -f "$REPO_DIR/.env.example" ] && cp -f "$REPO_DIR/.env.example" "$INSTALL_DIR/.env.example"
 
 # ---------- UI build ----------
@@ -248,6 +252,7 @@ if [ "$DO_LAUNCHD" = "1" ]; then
       -e "s|{{PROJECT_ROOT}}|$PROJECT_ROOT|g" \
       -e "s|{{PORT}}|$PORT|g" \
       -e "s|{{DEFAULT_MODEL}}|$MODEL|g" \
+      -e "s|{{HOME}}|$HOME|g" \
       "$TEMPLATE" > "$OUT"
     launchctl unload "$OUT" 2>/dev/null || true
     if launchctl load -w "$OUT" 2>/dev/null; then

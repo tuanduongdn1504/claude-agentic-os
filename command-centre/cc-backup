@@ -1,0 +1,86 @@
+#!/bin/bash
+# cc-backup — atomic, online-safe backup of Command Centre runtime.
+#
+# What it backs up:
+#   - SQLite DB via `sqlite3 .backup` (online-safe, handles WAL correctly)
+#   - .env (Telegram token, OTEL endpoint overrides, etc.)
+#   - notification_log offset (so Telegram dedupe survives a restore)
+#
+# What it skips:
+#   - logs/ (regenerable noise)
+#   - .tmp/ (runtime queue + PID markers — ephemeral)
+#   - venv/ + ui/dist/ (re-created by install.sh)
+#
+# Output: a single .tar.gz under $BACKUP_DIR (default ~/Backups/command-centre/),
+# named cc-runtime-YYYYMMDD-HHMMSS.tar.gz. Pruned to keep only the most recent
+# RETENTION_COUNT (default 12 — about 3 months at weekly cadence).
+#
+# Exit codes: 0 = ok, 2 = nothing to back up (DB missing), 3 = sqlite3 error.
+
+set -euo pipefail
+
+INSTALL_DIR="${CC_INSTALL_DIR:-$HOME/.command-centre}"
+BACKUP_DIR="${CC_BACKUP_DIR:-$HOME/Backups/command-centre}"
+RETENTION_COUNT="${CC_BACKUP_RETENTION:-12}"
+
+DB_SRC="$INSTALL_DIR/data/command-centre.db"
+ENV_SRC="$INSTALL_DIR/.env"
+
+if [ ! -f "$DB_SRC" ]; then
+  echo "[cc-backup] no DB at $DB_SRC — nothing to do" >&2
+  exit 2
+fi
+
+mkdir -p "$BACKUP_DIR"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-backup.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# Mirror the install layout under a stable top-level name so restore is obvious.
+SNAP_ROOT="$WORK_DIR/command-centre"
+mkdir -p "$SNAP_ROOT/data"
+
+# 1. Online-safe DB copy. `sqlite3 .backup` uses the SQLite backup API which
+#    works even while the server has the DB open in WAL mode. Plain `cp` of
+#    the .db + .db-wal can produce a corrupt snapshot.
+if ! sqlite3 "$DB_SRC" ".backup '$SNAP_ROOT/data/command-centre.db'" 2>/tmp/cc-backup-sqlite.err; then
+  echo "[cc-backup] sqlite3 .backup failed:" >&2
+  cat /tmp/cc-backup-sqlite.err >&2
+  exit 3
+fi
+
+# 2. .env (Telegram token, port, project root). Optional but highly desirable
+#    because re-running setup_telegram.py on the new machine = re-getting a
+#    new chat_id capture flow.
+if [ -f "$ENV_SRC" ]; then
+  cp "$ENV_SRC" "$SNAP_ROOT/.env"
+  chmod 600 "$SNAP_ROOT/.env"
+fi
+
+# 3. Telegram offset state (avoid duplicate notifications after restore).
+if [ -f "$INSTALL_DIR/.tmp/telegram-offset" ]; then
+  mkdir -p "$SNAP_ROOT/.tmp"
+  cp "$INSTALL_DIR/.tmp/telegram-offset" "$SNAP_ROOT/.tmp/telegram-offset"
+fi
+
+# 4. config snapshot (machine-specific paths — useful as a reference, not
+#    critical to restore since install.sh re-renders it).
+[ -f "$INSTALL_DIR/config" ] && cp "$INSTALL_DIR/config" "$SNAP_ROOT/config"
+
+# 5. tar it up.
+OUT="$BACKUP_DIR/cc-runtime-$STAMP.tar.gz"
+( cd "$WORK_DIR" && tar czf "$OUT" command-centre )
+chmod 600 "$OUT"
+
+# 6. Prune. Keep most recent N by mtime.
+if [ "$RETENTION_COUNT" -gt 0 ] 2>/dev/null; then
+  # ls -t sorts by mtime descending; tail keeps the rest beyond N.
+  ls -t "$BACKUP_DIR"/cc-runtime-*.tar.gz 2>/dev/null \
+    | tail -n +$((RETENTION_COUNT + 1)) \
+    | xargs -I{} rm -f {} 2>/dev/null || true
+fi
+
+# 7. Report.
+SIZE=$(du -h "$OUT" | awk '{print $1}')
+COUNT=$(ls -1 "$BACKUP_DIR"/cc-runtime-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+echo "[cc-backup] ✓ $OUT ($SIZE) · $COUNT total in $BACKUP_DIR (retention: $RETENTION_COUNT)"

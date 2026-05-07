@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.3.1 — weekly backup + cc backup subcommand
+
+Long-term data hygiene. The SQLite DB at `data/command-centre.db`
+holds your full session/task/decision/inbox history; without a
+backup, one bad `rm -rf` or disk failure wipes months of telemetry.
+
+### What ships
+
+- **`cc-backup`** script (alongside `cc` shim). Online-safe: uses
+  `sqlite3 .backup` (the proper SQLite backup API), so the daemon
+  can keep writing during the snapshot — no need to stop the server.
+  Tars `data/command-centre.db` + `.env` + `config` + the Telegram
+  offset state into `~/Backups/command-centre/cc-runtime-<stamp>.tar.gz`.
+  Prunes to the most recent `CC_BACKUP_RETENTION=12` snapshots
+  (default = 3 months at weekly cadence).
+- **`cc backup`** subcommand on the shim — same as calling
+  `cc-backup` directly, just discoverable from `cc help`.
+- **`com.commandcentre.weekly-backup.plist.template`** — picked up
+  by `install.sh`'s existing template loop. Fires every Sunday 03:00
+  local time. `launchd` catches up missed runs if the Mac was asleep.
+  `RunAtLoad=false` so install doesn't immediately fire one.
+- **`install.sh`**: copies `cc-backup` into `$INSTALL_DIR/bin/`
+  alongside `cc`; adds `{{HOME}}` substitution for plist templates
+  (the backup template needs it for `~/Backups/`).
+
+### Restore flow
+
+```bash
+# 1. New machine: install fresh.
+git clone <repo> && cd <repo>
+bash command-centre/install.sh --no-otel --no-launchd --no-start --yes
+
+# 2. Stop the server before swapping DBs.
+~/.command-centre/bin/cc stop
+
+# 3. Untar the backup.
+tar xzf ~/Backups/command-centre/cc-runtime-YYYYMMDD-HHMMSS.tar.gz \
+  -C ~/.command-centre --strip-components=1
+# (extracted layout: command-centre/{data,.env,config,...} → ~/.command-centre/{data,.env,...})
+
+# 4. Bring the server back up.
+~/.command-centre/bin/cc start
+```
+
+### Tunables (env vars or .env)
+
+| Var | Default | What |
+|---|---|---|
+| `CC_BACKUP_DIR` | `~/Backups/command-centre` | Where tarballs land |
+| `CC_BACKUP_RETENTION` | `12` | Keep this many tarballs; older are pruned by mtime |
+
+---
+
 ## v0.3.0 — Telegram bridge
 
 The last item from the original deferred list. Forwards pending
