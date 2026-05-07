@@ -16,7 +16,23 @@
 #   cc version               print version
 set -euo pipefail
 
-SELF="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks so `cc` works when invoked through ~/.local/bin/cc
+# (which symlinks into the install dir). macOS readlink is BSD — no -f —
+# so walk the chain manually.
+_resolve_self() {
+  local t="$1"
+  while [ -L "$t" ]; do
+    local link
+    link="$(readlink "$t")"
+    case "$link" in
+      /*) t="$link" ;;
+      *)  t="$(dirname "$t")/$link" ;;
+    esac
+  done
+  printf '%s\n' "$t"
+}
+SELF_PATH="$(_resolve_self "$0")"
+SELF="$(cd "$(dirname "$SELF_PATH")" && pwd)"
 # INSTALL_DIR is bin/ parent (the install layout). If we were invoked from
 # the repo root (dev), the sibling `scripts/` folder is next to this file.
 if [ -d "$SELF/../scripts" ]; then

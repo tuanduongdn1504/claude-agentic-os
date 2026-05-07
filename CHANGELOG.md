@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.3.2 — fix: `cc` via `~/.local/bin` symlink
+
+Bug fix. When `install.sh` symlinks `~/.local/bin/cc` →
+`~/.command-centre/bin/cc`, invoking `cc setup telegram` (or any
+subcommand that resolves a script under `$INSTALL_DIR/scripts/`)
+failed with:
+
+```
+can't open file '/Users/<you>/.local/bin/scripts/setup_telegram.py': [Errno 2]
+```
+
+Root cause: the shim computed `INSTALL_DIR` from `$(dirname "$0")`
+without resolving symlinks, so it picked up `~/.local/bin` instead of
+`~/.command-centre`. macOS `readlink` is BSD (no `-f`), so the fix
+walks the symlink chain by hand.
+
+### What ships
+
+- **`cc`** shim now resolves `$0` through any symlink chain before
+  computing `INSTALL_DIR`. Works whether you call `cc` directly,
+  via `~/.local/bin/cc`, or via any other symlink.
+
+No data, schema, or config changes. Drop-in replacement.
+
 ## v0.3.1 — weekly backup + cc backup subcommand
 
 Long-term data hygiene. The SQLite DB at `data/command-centre.db`
