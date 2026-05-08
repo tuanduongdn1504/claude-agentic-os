@@ -188,8 +188,65 @@ def _format_inbox(m: dict) -> str:
     )
 
 
+def _fmt_duration_ms(ms: Optional[int]) -> str:
+    if not ms:
+        return "—"
+    if ms < 1000:
+        return f"{ms}ms"
+    if ms < 60_000:
+        return f"{ms/1000:.1f}s"
+    mm, ss = divmod(int(ms / 1000), 60)
+    return f"{mm}m {ss}s"
+
+
+def _md_safe(s: str) -> str:
+    """Strip Markdown V1 control chars from user-content fields so the
+    Telegram parser can't trip on unbalanced _ * ` [."""
+    if not s:
+        return ""
+    return s.replace("_", " ").replace("*", " ").replace("`", "'").replace("[", "(").replace("]", ")")
+
+
+def _format_task_complete(t: dict) -> str:
+    """Format a finished task (status=done|failed) for Telegram."""
+    icon = "✅" if t.get("status") == "done" else "❌"
+    label = "DONE" if t.get("status") == "done" else "FAILED"
+    title = _md_safe((t.get("title") or "(untitled)")[:200])
+    dur = _fmt_duration_ms(t.get("duration_ms"))
+    cost = f"${(t.get('cost_usd') or 0):.2f}"
+    sid = (t.get("session_id") or "")[:8]
+
+    header = f"{icon} *TASK {label}* `#{t['id']}`"
+    if sid:
+        header += f" · session `{sid}`"
+
+    body = f"\n\n{title}\n\nduration {dur} · cost {cost}"
+
+    extra = ""
+    if t.get("status") == "failed" and t.get("error_message"):
+        err = _md_safe(t["error_message"][:500])
+        extra = f"\n\nerror: {err}"
+    elif t.get("output_summary"):
+        summary = _md_safe(t["output_summary"][:500])
+        extra = f"\n\n{summary}"
+
+    return header + body + extra
+
+
+def _format_risk_gated(t: dict) -> str:
+    """Format a risk-gated task (status=awaiting_approval) for Telegram."""
+    title = _md_safe((t.get("title") or "(untitled)")[:200])
+    risk = t.get("risk_level") or "high"
+    return (
+        f"🛑 *RISK-GATED* `#{t['id']}` · risk_level=`{risk}`"
+        + f"\n\n{title}\n\n"
+        + f"_Hard risk gate blocked dispatch._\n"
+        + f"Reply `/approve {t['id']}` to override, or `/cancel {t['id']}` to drop."
+    )
+
+
 def _outbound_tick() -> dict:
-    sent = {"decisions": 0, "inbox": 0, "errors": 0}
+    sent = {"decisions": 0, "inbox": 0, "task_complete": 0, "risk_gated": 0, "errors": 0}
     # Decisions.
     try:
         ds = _http_get_json(f"{DASHBOARD_URL}/api/decisions?status=pending")
@@ -229,6 +286,48 @@ def _outbound_tick() -> dict:
     except Exception as exc:
         sent["errors"] += 1
         print(f"[telegram] /api/inbox fetch failed: {exc!r}", file=sys.stderr)
+
+    # Task completion (done + failed).
+    # /api/tasks supports status param; query both done and failed in one call
+    # by hitting twice — the listing endpoint doesn't support status_in.
+    for status in ("done", "failed"):
+        try:
+            tasks = _http_get_json(f"{DASHBOARD_URL}/api/tasks?status={status}&limit=50")
+            for t in tasks.get("items", []):
+                key = str(t["id"])
+                if _already_notified("task_complete", key):
+                    continue
+                try:
+                    mid = _send_message(_format_task_complete(t))
+                    if mid:
+                        _record_notify("task_complete", key, str(mid))
+                        sent["task_complete"] += 1
+                except Exception as exc:
+                    sent["errors"] += 1
+                    print(f"[telegram] task_complete notify failed: {exc!r}", file=sys.stderr)
+        except Exception as exc:
+            sent["errors"] += 1
+            print(f"[telegram] /api/tasks?status={status} fetch failed: {exc!r}", file=sys.stderr)
+
+    # Risk-gated tasks (awaiting_approval).
+    try:
+        rg = _http_get_json(f"{DASHBOARD_URL}/api/tasks?status=awaiting_approval&limit=20")
+        for t in rg.get("items", []):
+            key = str(t["id"])
+            if _already_notified("risk_gated", key):
+                continue
+            try:
+                mid = _send_message(_format_risk_gated(t))
+                if mid:
+                    _record_notify("risk_gated", key, str(mid))
+                    sent["risk_gated"] += 1
+            except Exception as exc:
+                sent["errors"] += 1
+                print(f"[telegram] risk_gated notify failed: {exc!r}", file=sys.stderr)
+    except Exception as exc:
+        sent["errors"] += 1
+        print(f"[telegram] /api/tasks?status=awaiting_approval fetch failed: {exc!r}", file=sys.stderr)
+
     return sent
 
 
@@ -236,8 +335,13 @@ def _outbound_loop() -> None:
     while not _STOP.is_set():
         try:
             stats = _outbound_tick()
-            if stats["decisions"] or stats["inbox"]:
-                print(f"[telegram] notified d={stats['decisions']} i={stats['inbox']} err={stats['errors']}", flush=True)
+            if any(stats[k] for k in ("decisions", "inbox", "task_complete", "risk_gated")):
+                print(
+                    f"[telegram] notified d={stats['decisions']} i={stats['inbox']} "
+                    f"tc={stats['task_complete']} rg={stats['risk_gated']} "
+                    f"err={stats['errors']}",
+                    flush=True,
+                )
         except Exception as exc:
             print(f"[telegram] outbound tick crashed: {exc!r}", file=sys.stderr)
         # Interruptible sleep.
