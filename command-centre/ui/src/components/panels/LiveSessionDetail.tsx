@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Textarea } from '@/components/ui/Field';
 import { usePostLiveMessage, useSessionDetails } from '@/hooks/useQueries';
-import { cwdShort, fmtMs, fmtUsd } from '@/lib/format';
+import { cwdShort, fmtMs, fmtUsd, fmtTimeUTC7, fmtDateTimeUTC7 } from '@/lib/format';
 import type { ToolTimelineRow } from '@/lib/types';
 import { Send } from 'lucide-react';
 
@@ -52,7 +52,7 @@ export function LiveSessionDetail({ sessionId, onClose }: { sessionId: string | 
               <Stat label="model" value={session.model ?? '—'} />
               <Stat label="branch" value={session.git_branch ?? '—'} />
               <Stat label="cwd" value={cwdShort(session.cwd)} mono />
-              <Stat label="started" value={session.started_at?.slice(0, 19) ?? '—'} mono />
+              <Stat label="started" value={fmtDateTimeUTC7(session.started_at)} mono />
               <Stat label="tokens (effective)" value={session.effective_tokens.toLocaleString()} />
               <Stat label="cost" value={fmtUsd(session.cost_usd)} />
               <Stat label="errors" value={String(session.error_count)} />
@@ -131,7 +131,7 @@ function TimelineRow({ row }: { row: ToolTimelineRow }) {
       errored ? 'bg-status-red/5 border-status-red/20' : 'bg-surface-2/30 border-transparent'
     }`}>
       <span className="text-text-subtle w-[62px] tabular-nums">
-        {row.ts.slice(11, 19)}
+        {fmtTimeUTC7(row.ts)}
       </span>
       <span className={`flex-1 truncate ${errored ? 'text-status-red' : 'text-text'}`}>
         {row.tool_name}

@@ -8,7 +8,7 @@ import { StatePill } from '@/components/ui/StatePill';
 import { Select } from '@/components/ui/Field';
 import { firehoseUrl } from '@/lib/api';
 import type { FirehoseEvent } from '@/lib/types';
-import { fmtMs } from '@/lib/format';
+import { fmtMs, fmtTimeUTC7 } from '@/lib/format';
 
 const MAX_BUFFER = 400;
 
@@ -102,7 +102,7 @@ export function OtelFirehose() {
 }
 
 function EventRow({ e }: { e: FirehoseEvent }) {
-  const ts = e.timestamp?.slice(11, 19) ?? '—';
+  const ts = fmtTimeUTC7(e.timestamp);
   const errored = !!e.error_message;
   return (
     <div className={`py-1 px-2 rounded flex items-center gap-2 ${errored ? 'text-status-red' : ''}`}>

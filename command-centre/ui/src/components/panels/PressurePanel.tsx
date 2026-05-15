@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/Badge';
 import { StatePill } from '@/components/ui/StatePill';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useSystemPressure } from '@/hooks/useQueries';
+import { fmtTimeUTC7 } from '@/lib/format';
 
 export function PressurePanel() {
   const { data, isLoading } = useSystemPressure();
@@ -48,7 +49,7 @@ export function PressurePanel() {
             {recent.slice(0, 30).map((r, i) => (
               <li key={`${r.timestamp}-${i}`} className="text-[11.5px] font-mono py-1.5 px-2 rounded bg-status-red/5 border border-status-red/20">
                 <div className="flex items-center gap-2 mb-0.5">
-                  <span className="text-text-subtle">{r.timestamp.slice(11, 19)}</span>
+                  <span className="text-text-subtle">{fmtTimeUTC7(r.timestamp)}</span>
                   <Badge tone="red">{r.subtype}</Badge>
                   {r.retry_attempt != null && r.max_retries != null && (
                     <span className="text-text-subtle">retry {r.retry_attempt}/{r.max_retries}</span>

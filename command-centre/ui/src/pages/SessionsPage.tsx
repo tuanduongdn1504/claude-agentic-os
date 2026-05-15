@@ -9,21 +9,16 @@ import { RangePicker } from '@/components/panels/TokenUsageCard';
 import * as api from '@/lib/api';
 import type { Range } from '@/lib/api';
 import type { SessionRow } from '@/lib/types';
-import { cwdShort, fmtMs, fmtUsd } from '@/lib/format';
+import { cwdShort, fmtMs, fmtUsd, fmtTimeUTC7, localDateUTC7 } from '@/lib/format';
 import { cn } from '@/lib/cn';
 
 function toLocalDate(iso: string | null): string {
-  if (!iso) return 'unknown';
-  try {
-    return new Date(iso).toLocaleDateString('en-CA');
-  } catch {
-    return 'unknown';
-  }
+  return localDateUTC7(iso);
 }
 
 function labelDate(ymd: string): string {
-  const today = new Date().toLocaleDateString('en-CA');
-  const yesterday = new Date(Date.now() - 86_400_000).toLocaleDateString('en-CA');
+  const today = localDateUTC7(new Date().toISOString());
+  const yesterday = localDateUTC7(new Date(Date.now() - 86_400_000).toISOString());
   if (ymd === today) return 'Today';
   if (ymd === yesterday) return 'Yesterday';
   try {
@@ -212,7 +207,7 @@ function SessionItem({ session: s, onClick }: { session: SessionRow; onClick: ()
           }
         </div>
         <div className="text-[11px] text-text-subtle font-mono">
-          {s.started_at?.slice(11, 19) ?? '—'}
+          {fmtTimeUTC7(s.started_at)}
           {s.model ? ` · ${s.model.replace(/^claude-/, '').split('-').slice(0, 2).join('-')}` : ''}
         </div>
       </div>

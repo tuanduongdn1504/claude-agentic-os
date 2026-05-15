@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, Kicker } fro
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useSessionFailures } from '@/hooks/useQueries';
-import { cwdShort, fmtCount, fmtUsd } from '@/lib/format';
+import { cwdShort, fmtCount, fmtUsd, fmtDateTimeUTC7 } from '@/lib/format';
 
 export function UnifiedFailures() {
   const { data, isLoading } = useSessionFailures('30d');
@@ -48,7 +48,7 @@ export function UnifiedFailures() {
                   <span>{s.model ?? '—'}</span>
                   <span>{fmtCount(s.effective_tokens)} tok</span>
                   <span>{fmtUsd(s.cost_usd)}</span>
-                  {s.started_at && <span className="ml-auto">{s.started_at.slice(0, 19)}</span>}
+                  {s.started_at && <span className="ml-auto">{fmtDateTimeUTC7(s.started_at)}</span>}
                 </div>
               </li>
             ))}

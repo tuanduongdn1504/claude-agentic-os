@@ -1,5 +1,41 @@
 // Small pure formatters used across panels.
 
+// Timezone for all clock displays. Stored once so changing it is a one-liner.
+const TZ = 'Asia/Ho_Chi_Minh'; // UTC+7
+
+/** Format a UTC ISO string as HH:MM:SS in GMT+7. */
+export function fmtTimeUTC7(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleTimeString('en-GB', { timeZone: TZ, hour12: false });
+  } catch {
+    return '—';
+  }
+}
+
+/** Format a UTC ISO string as YYYY-MM-DD HH:MM:SS in GMT+7. */
+export function fmtDateTimeUTC7(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    const date = d.toLocaleDateString('en-CA', { timeZone: TZ });
+    const time = d.toLocaleTimeString('en-GB', { timeZone: TZ, hour12: false });
+    return `${date} ${time}`;
+  } catch {
+    return '—';
+  }
+}
+
+/** Format a UTC ISO string as YYYY-MM-DD date in GMT+7 (for grouping / comparison). */
+export function localDateUTC7(iso: string | null | undefined): string {
+  if (!iso) return 'unknown';
+  try {
+    return new Date(iso).toLocaleDateString('en-CA', { timeZone: TZ });
+  } catch {
+    return 'unknown';
+  }
+}
+
 export function fmtCount(n: number | null | undefined): string {
   if (n == null) return '—';
   if (n < 1000) return String(n);
