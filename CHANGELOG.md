@@ -35,7 +35,7 @@ daily cost cap dollar-blind.
   `POST /api/skills/{name}/launch` → optimistic UI → dispatcher triggered
   inline (no 120s wait for next heartbeat).
 - **`cost_source` enum** (`api_pool` / `max_sub` / `unknown`, with
-  `codex_api` slot reserved for v0.5) on `ops_tasks` + `sessions`.
+  `codex_api` slot reserved for a future release) on `ops_tasks` + `sessions`.
   Dispatcher and launcher write `api_pool`; `sync_sessions.py` derives
   `max_sub` for interactive REPL/IDE sessions via a left-join against
   `ops_tasks`. Race covered by a two-line back-fill in
@@ -76,7 +76,87 @@ preserves all rows.
 Review before kicking off the build. Open design questions called out
 inline in the amendment file (preset JSON blob vs nine columns, launcher
 default `classic` vs composer default `stream`, cap reads api_pool only,
-`codex_api` slot reserved for v0.5).
+`codex_api` slot reserved for a future release).
+
+---
+
+## v0.5.0-mvp1 — Telegram bridge: outbound task_complete + risk_gated push
+
+MVP commit 1 of 2 per the Resource Risk mitigation in the Telegram Remote
+Trigger PRD (`command-centre/docs/prd-telegram-remote.md`, commit
+`3fd6e35`). Closes the feedback loop for FR11 (task-complete push) and
+FR12 (risk-gated push). Backfilled into CHANGELOG retroactively at v0.6.0
+spec time — original commit was `1936cdf`.
+
+### What ships
+
+All changes in `command-centre/scripts/telegram_bridge.py` (+107 / -3).
+
+- `_outbound_tick()` now polls `/api/tasks?status=done|failed` and
+  `/api/tasks?status=awaiting_approval`, pushing each new transition once
+  via `notification_log` dedupe (`event_type='task_complete'` or
+  `'risk_gated'`).
+- `_format_task_complete()` renders done/failed task summaries with title,
+  duration, cost, session, plus `error_message` (failed) or
+  `output_summary` (done).
+- `_format_risk_gated()` renders gated-task notifications with title,
+  `risk_level`, and inline `/approve <id>` + `/cancel <id>` recovery
+  hints.
+- `_md_safe()` sanitises Markdown V1 control chars (`_ * \` [ ]`) in
+  user-content fields to prevent Telegram parser 400s.
+- `_outbound_loop()` log line extended: `notified d= i= tc= rg= err=`.
+
+### Pre-impl spike findings
+
+- `/api/tasks/{id}/approve` already exists (`tasks.py:132`). No work
+  needed for FR16.
+- State name confirmed: `'awaiting_approval'` (PRD assumption correct).
+- `/api/tasks/{id}/cancel` does NOT exist yet — deferred to mvp2 (~30
+  min estimate).
+
+### Verified
+
+Synthetic `done` task → 30s tick → TG message id=13 delivered,
+`notification_log` row written, dedupe verified on re-tick.
+
+### Not in this release (deferred to mvp2)
+
+- Inbound `/run`, `/approve`, `/cancel` parsers (Journey 4 closure).
+
+---
+
+## v0.4.0 — operator UI: Sessions Explorer, Decisions Queue, Telegram bridge status
+
+Three new operator surfaces on the dashboard. UI-heavy release with a
+single new health endpoint — no schema changes, no dispatcher behaviour
+changes. Backfilled into CHANGELOG retroactively at v0.6.0 spec time —
+original commit was `5d0a72b`.
+
+### What ships
+
+- **`/sessions`** — Sessions Explorer. Two-panel layout (projects →
+  timeline); client-side grouping over `/api/sessions` (limit=500), no new
+  backend route.
+- **`/decisions`** — HITL hub combining the existing `DecisionsCard` and
+  `InboxCard` plus answered history. Pending count badge in nav (polls
+  every 5s).
+- **`/api/system/telegram`** — Telegram bridge health endpoint: pgrep
+  liveness probe, `notification_log` stats over 24h, stderr-tail of the
+  last error. Surfaced as a status row at the top of `/decisions`.
+
+### Frontend
+
+- New pages: `SessionsPage.tsx` (+226 lines), `DecisionsPage.tsx` (+131).
+- New panel: `TelegramBridgeStatus.tsx` (+92).
+- Nav, router, types, hooks, and api wrappers extended (~57 lines
+  combined).
+
+### Backend
+
+- `command-centre/scripts/routers/system.py` (+93 lines) — adds the
+  `/api/system/telegram` endpoint.
+
+Total diff: 9 files, +595 insertions, -4 deletions.
 
 ---
 

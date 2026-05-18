@@ -60,7 +60,7 @@ type)` helper. Five columns total across three tables. Re-runnable.
     `'max_sub'` | `'unknown'`. Dispatcher and launcher both write
     `'api_pool'`. UI-created tasks via TaskComposer default to `'api_pool'`
     too (every dispatched task runs headless). Reserve the slot for a future
-    `'codex_api'` value when a Codex backend is bolted on (v0.5).
+    `'codex_api'` value when a Codex backend is bolted on in a future release.
 
 - **`sessions`** — add:
   - `cost_source` TEXT NOT NULL DEFAULT `'unknown'` — same enum. Derived by
@@ -273,8 +273,8 @@ reached cap ($X.XX of $Y.YY today). Max-sub usage continues."
 ### Forward-compat: codex backend slot
 
 This release does NOT add a Codex backend. But the `cost_source` validator
-must accept `'codex_api'` as a fourth enum value from the start so a v0.5
-backend swap is purely a dispatcher change, no schema migration. Add it to
+must accept `'codex_api'` as a fourth enum value from the start so a
+future backend swap is purely a dispatcher change, no schema migration. Add it to
 the validator now; reject all other values.
 
 ## Setup UX delta
@@ -356,8 +356,9 @@ Append to the existing list:
 
 - **Codex backend.** The `cost_source` validator reserves the
    `'codex_api'` slot; backend pluggability (env switch, argv check in
-   emergency-stop, model resolution) is a v0.5 change with its own brief.
-- **Per-skill cost budgets.** Different concept from the daily cap. v0.5+.
+   emergency-stop, model resolution) is a future change with its own brief.
+- **Per-skill cost budgets.** Different concept from the daily cap.
+   Future release.
 - **Obsidian embed mode** (`/embed` route stripping AppShell chrome for
    iframe use). A separate path if you decide to ship an Obsidian
    companion; not entangled with this release.
