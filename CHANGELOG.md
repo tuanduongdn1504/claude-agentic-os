@@ -1,5 +1,85 @@
 # Changelog
 
+## v0.6.0 — DRAFT spec: SkillLauncher + cost-source disambiguation
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.0-amendment.md`,
+applied on top of the v0.5.0-mvp1 working tree (current `main` HEAD).
+
+Note: v0.4.0 (operator UI — Sessions Explorer, Decisions Queue, Telegram
+bridge status) and v0.5.0-mvp1 (Telegram outbound: task_complete +
+risk_gated push) shipped in git after v0.3.2 but were not backfilled into
+this CHANGELOG. Commit messages are the current record; backfill is
+queued alongside the v0.6.0 build.
+
+### Why this release
+
+Two gaps in the current build.
+
+**Workflow.** Queuing a skill today means opening TaskComposer and filling
+eight fields, every time. Skills you run daily (morning brief, deep
+research, inbox triage) should be one click — same task, sensible defaults,
+fire-and-forget.
+
+**Observability.** As of Anthropic's recent billing change, headless
+`claude -p` no longer draws from Pro/Max — it pulls from a separate ~$200/mo
+API pool at full API rates (~10× the Max-subsidised cost). The dashboard
+mixes both streams into a single `cost_usd` today, which makes the v0.2.0
+daily cost cap dollar-blind.
+
+### What's planned
+
+- **`SkillLauncher` panel** on the Command page. One-click launch per
+  `user_invocable` skill with stored presets, last-launched timestamp,
+  30-day avg cost, inline preset editor. Fires via new endpoint
+  `POST /api/skills/{name}/launch` → optimistic UI → dispatcher triggered
+  inline (no 120s wait for next heartbeat).
+- **`cost_source` enum** (`api_pool` / `max_sub` / `unknown`, with
+  `codex_api` slot reserved for v0.5) on `ops_tasks` + `sessions`.
+  Dispatcher and launcher write `api_pool`; `sync_sessions.py` derives
+  `max_sub` for interactive REPL/IDE sessions via a left-join against
+  `ops_tasks`. Race covered by a two-line back-fill in
+  `task_tracker.claim_pending`.
+- **`MISSION_CONTROL_DAILY_COST_CAP_USD` re-pointed to api_pool only.**
+  Max-sub cost is notional for Pro/Max operators; capping on it would
+  surprise users. The cap exists to protect real-dollar spend.
+- **UI splits** — KpiRow cost tile shows `api $X · max $Y`; DispatcherStrip
+  reads `today api / cap`; SessionsTable gains a Source column + filter;
+  TaskBoard cards gain a small source pill; TokenUsageCard gains a per-day
+  cost band beneath the token stacks.
+- **Pre-v0.6 rows** surface as amber `?` tags everywhere. `cc doctor`
+  reports a non-fatal warning. Manual recourse documented in HANDOVER.md.
+
+### Schema delta
+
+Five columns total across three tables, all through the existing
+`_migrate_add_column` helper:
+
+| Table | Column | Type | Default |
+|---|---|---|---|
+| `skills` | `preset_json` | TEXT | NULL |
+| `skills` | `last_launched_at` | TEXT | NULL |
+| `skills` | `launch_count` | INTEGER | `0` |
+| `ops_tasks` | `cost_source` | TEXT | `'unknown'` |
+| `sessions` | `cost_source` | TEXT | `'unknown'` |
+
+Idempotent. Re-running `install.sh` against v0.5.x upgrades in place,
+preserves all rows.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Review before kicking off the build. Open design questions called out
+inline in the amendment file (preset JSON blob vs nine columns, launcher
+default `classic` vs composer default `stream`, cap reads api_pool only,
+`codex_api` slot reserved for v0.5).
+
+---
+
 ## v0.3.2 — fix: `cc` via `~/.local/bin` symlink
 
 Bug fix. When `install.sh` symlinks `~/.local/bin/cc` →
