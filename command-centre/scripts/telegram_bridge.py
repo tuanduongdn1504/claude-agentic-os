@@ -30,8 +30,17 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+try:
+    from zoneinfo import ZoneInfo  # py3.9+
+    _LOCAL_TZ: Optional["ZoneInfo"] = ZoneInfo("Asia/Ho_Chi_Minh")
+except Exception:
+    # Fallback: naive system local time. /status timestamp loses the
+    # explicit `GMT+7` suffix but otherwise renders fine.
+    _LOCAL_TZ = None
 
 # Resolve install dir + DB path the same way other scripts do.
 _HERE = Path(__file__).resolve().parent
@@ -356,22 +365,25 @@ def _outbound_loop() -> None:
 # Inbound — long-poll Telegram, route replies back to the API.
 # ---------------------------------------------------------------------------
 
-# Slash command grammar (v0.5.0-mvp2):
+# Slash command grammar (v0.5.0-mvp2 + v0.6.1):
 #
 #   /answer <decision_id> <body>          → answer a pending decision     (v0.3.0)
 #   /reply  <inbox_id>    <body>          → reply to an inbox message     (v0.3.0)
 #   /approve <task_id>                    → override risk gate            (v0.5.0-mvp2, FR16)
 #   /cancel  <task_id>                    → cancel pending / risk-gated   (v0.5.0-mvp2, FR18)
 #   /run <prompt>                         → POST /api/tasks                (v0.5.0-mvp2, FR1-4)
+#   /status                               → read-only telemetry snapshot   (v0.6.1, Phase 2)
 #
 # Two patterns because `/run` doesn't take a leading int ID — keeping the
 # verbs in one regex would force a body for every verb. The body group is
 # optional in _CMD_WITH_ID_RE so /approve and /cancel parse without one.
+# `/status` is a third sibling — strict whole-message match, no args.
 _CMD_WITH_ID_RE = re.compile(
     r"^/(answer|reply|approve|cancel)\s+(\d+)(?:\s+(.+))?$",
     re.IGNORECASE | re.DOTALL,
 )
 _CMD_RUN_RE = re.compile(r"^/run\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_CMD_STATUS_RE = re.compile(r"^/status\s*$", re.IGNORECASE)
 
 # `/run` prompt cap — amendment says 3000 chars (PRD says 4000 for outbound
 # body truncation, but inbound /run uses the tighter limit to match the
@@ -528,15 +540,299 @@ def _handle_cancel(chat_id: Any, message_id: Any, task_id: int) -> None:
             _reply_text(chat_id, message_id, f"⚠️ cancel failed · {safe_body}")
 
 
+# ---------------------------------------------------------------------------
+# /status — v0.6.1, Phase 2.
+# ---------------------------------------------------------------------------
+#
+# Read-only telemetry snapshot. Fetches 5 GET endpoints in sequence with
+# per-call try/except; failed endpoints render `?` for their metric and a
+# footer line flags partial data. Total server failure → fallback message,
+# never crashes the inbound long-poll loop. No `activities` audit-log row —
+# `/status` is passive awareness, not a state-changing operator action
+# (deliberate departure from mvp2's audit-everything-from-Telegram pattern).
+
+
+def _now_local() -> datetime:
+    """`datetime.now()` pinned to `Asia/Ho_Chi_Minh` when zoneinfo is
+    available. Used for the /status header timestamp + today-bucketing."""
+    return datetime.now(_LOCAL_TZ) if _LOCAL_TZ else datetime.now()
+
+
+def _now_local_str() -> str:
+    """`HH:MM GMT+7` — matches the v0.5.0-mvp1 timezone-fix convention."""
+    if _LOCAL_TZ:
+        return _now_local().strftime("%H:%M GMT+7")
+    return _now_local().strftime("%H:%M")
+
+
+def _today_local_date() -> str:
+    """`YYYY-MM-DD` in the bridge's local tz. Used to bucket task counts."""
+    return _now_local().strftime("%Y-%m-%d")
+
+
+def _parse_db_utc(s: Optional[str]) -> Optional[datetime]:
+    """Parse a SQLite-style `YYYY-MM-DD HH:MM:SS` string as UTC. Returns
+    None on failure or empty input. Also accepts ISO-8601 with explicit
+    offset for forward-compat."""
+    if not s:
+        return None
+    try:
+        # SQLite default — no T, no TZ — treat as UTC (datetime('now')).
+        return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _utc_to_local_date(s: Optional[str]) -> Optional[str]:
+    """Project a UTC timestamp string to its local-tz `YYYY-MM-DD`."""
+    dt = _parse_db_utc(s)
+    if not dt:
+        return None
+    if _LOCAL_TZ:
+        return dt.astimezone(_LOCAL_TZ).strftime("%Y-%m-%d")
+    return dt.astimezone().strftime("%Y-%m-%d")
+
+
+def _age_short(seconds: Optional[int]) -> str:
+    """Compact age string for the live-sessions line: `12s`, `4m`, `1h 20m`,
+    `2d`. `?` when the input is None or negative (clock skew). Tuned for
+    mobile readability — never more than 6 chars."""
+    if seconds is None or seconds < 0:
+        return "?"
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        h, rem = divmod(seconds, 3600)
+        m = rem // 60
+        return f"{h}h {m}m" if m else f"{h}h"
+    return f"{seconds // 86400}d"
+
+
+def _format_status(metrics: dict[str, Any]) -> str:
+    """Render the `/status` Telegram reply body. `metrics` keys (any value
+    may be None to mean failed-to-fetch — substituted as `?`):
+      - `dispatcher`: dict | None         (whole /api/system/dispatcher)
+      - `pending_decisions`: int | None   (count of pending decisions)
+      - `live_sessions`: list | None      (items from /api/sessions/live)
+      - `today_counts`: dict              ({'done': int|None, 'failed': ...,
+                                           'awaiting_approval': int|None})
+      - `emergency_stop`: bool | None     (system_state.emergency_stop)
+
+    Mobile-readable (390 px iPhone — NFR4). Markdown V1 (existing bridge
+    convention). All template-controlled (no user-content fields) so
+    `_md_safe` is not needed."""
+    d = metrics.get("dispatcher") or {}
+    lines: list[str] = [f"*STATUS*  _{_now_local_str()}_", ""]
+
+    # 1. Dispatcher.
+    if metrics.get("dispatcher") is None:
+        lines.append("⚙️  Dispatcher  *?*")
+    else:
+        running = d.get("running")
+        cap = d.get("max_concurrent")
+        free = d.get("free_slots")
+        running_s = "?" if running is None else str(running)
+        cap_s = "?" if cap is None else str(cap)
+        free_s = "?" if free is None else str(free)
+        lines.append(f"⚙️  Dispatcher  *{running_s}/{cap_s}* running · *{free_s}* free")
+
+    # 2. Cost (today).
+    if metrics.get("dispatcher") is None:
+        lines.append("💰 Today        *?*")
+    else:
+        api = float(d.get("today_cost_api_pool_usd") or 0.0)
+        mx = float(d.get("today_cost_max_sub_usd") or 0.0)
+        cap_usd = d.get("daily_cost_cap_usd")
+        api_s = f"*${api:.2f}*" if api > 0 else "—"
+        mx_s = f"*${mx:.2f}*" if mx > 0 else "—"
+        cap_s = f"cap ${float(cap_usd):.2f}" if cap_usd else "no cap"
+        lines.append(f"💰 Today        api {api_s} · max {mx_s} · {cap_s}")
+
+    # 3. Pending decisions — omit on zero (no idle-day noise).
+    pd = metrics.get("pending_decisions")
+    if pd is None:
+        lines.append("📨 Decisions    *?* pending")
+    elif pd > 0:
+        lines.append(f"📨 Decisions    *{pd}* pending")
+
+    # 4. Live sessions — omit on zero. Age = longest-running (oldest started_at).
+    live = metrics.get("live_sessions")
+    if live is None:
+        lines.append("🟢 Live         *?* active")
+    elif live:
+        now_utc = datetime.now(timezone.utc)
+        oldest_s: Optional[int] = None
+        for s in live:
+            dt = _parse_db_utc(s.get("started_at"))
+            if not dt:
+                continue
+            age = int((now_utc - dt).total_seconds())
+            if oldest_s is None or age > oldest_s:
+                oldest_s = age
+        age_str = _age_short(oldest_s) if oldest_s is not None else "?"
+        n = len(live)
+        word = "session" if n == 1 else "sessions"
+        lines.append(f"🟢 Live         *{n}* {word} · {age_str} active")
+
+    # 5. Tasks today — always show, even all-zeros (operators want to see
+    # "nothing happened today" explicitly).
+    tc = metrics.get("today_counts") or {}
+    def _f(v: Optional[int]) -> str:
+        return "?" if v is None else str(v)
+    lines.append(
+        f"✅ Tasks today  {_f(tc.get('done'))} done · "
+        f"{_f(tc.get('failed'))} failed · "
+        f"{_f(tc.get('awaiting_approval'))} risk-gated"
+    )
+
+    # Conditional alerts — only when active. Order: 🛑 first (loudest),
+    # then cost cap, then back-pressure.
+    alerts: list[str] = []
+    if metrics.get("emergency_stop") is True:
+        alerts.append("🛑 *Emergency stop ON* — dispatcher refusing new work")
+    if metrics.get("dispatcher") is not None and d.get("cost_capped"):
+        api = float(d.get("today_cost_api_pool_usd") or 0.0)
+        cap_usd = float(d.get("daily_cost_cap_usd") or 0.0)
+        alerts.append(f"⚠️  *Cost cap reached* (api_pool ${api:.2f} / ${cap_usd:.2f})")
+    if metrics.get("dispatcher") is not None and d.get("back_pressure"):
+        running = d.get("running") or 0
+        cap = d.get("max_concurrent") or 0
+        alerts.append(f"⚠️  *Back-pressure active* — {running}/{cap} slots full")
+    if alerts:
+        lines.append("")
+        lines.extend(alerts)
+
+    # Partial-failure footer — any `?` substitution → append the line.
+    today_partial = any(v is None for v in (metrics.get("today_counts") or {}).values())
+    any_partial = (
+        metrics.get("dispatcher") is None
+        or metrics.get("pending_decisions") is None
+        or metrics.get("live_sessions") is None
+        or metrics.get("emergency_stop") is None
+        or today_partial
+    )
+    if any_partial:
+        lines.append("")
+        lines.append("_some metrics unavailable — see logs_")
+
+    return "\n".join(lines)
+
+
+def _handle_status(chat_id: Any) -> None:
+    """`/status` — read-only telemetry snapshot. Hits 5 GET endpoints in
+    sequence with per-call try/except. If ALL fail, sends a clear
+    "dashboard down?" fallback message instead of a half-rendered template.
+    Never crashes the inbound loop (NFR11). No audit-log row by design."""
+    metrics: dict[str, Any] = {}
+
+    def _log(name: str, exc: Exception) -> None:
+        print(f"[telegram] /status {name} fetch failed: {exc!r}", file=sys.stderr)
+
+    # 1. Dispatcher state — drives the run/cap/free + today-cost + cap-status lines.
+    try:
+        metrics["dispatcher"] = _http_get_json(
+            f"{DASHBOARD_URL}/api/system/dispatcher", timeout=3.0)
+    except Exception as exc:
+        _log("dispatcher", exc)
+        metrics["dispatcher"] = None
+
+    # 2. Pending decisions count.
+    try:
+        d = _http_get_json(
+            f"{DASHBOARD_URL}/api/decisions?status=pending", timeout=3.0)
+        metrics["pending_decisions"] = len(d.get("items", []))
+    except Exception as exc:
+        _log("decisions", exc)
+        metrics["pending_decisions"] = None
+
+    # 3. Live sessions (5-min window from /api/sessions/live).
+    try:
+        d = _http_get_json(f"{DASHBOARD_URL}/api/sessions/live", timeout=3.0)
+        metrics["live_sessions"] = d.get("items", [])
+    except Exception as exc:
+        _log("sessions_live", exc)
+        metrics["live_sessions"] = None
+
+    # 4. Today's tasks by status. Three calls — done + failed bucketed by
+    # `completed_at`, awaiting_approval by `created_at` (the natural
+    # entry-time field for tasks that haven't completed). Per-status
+    # try/except so a single failure doesn't black-out the whole line.
+    today = _today_local_date()
+    counts: dict[str, Optional[int]] = {
+        "done": None, "failed": None, "awaiting_approval": None,
+    }
+    tasks_any_ok = False
+    for status in ("done", "failed", "awaiting_approval"):
+        try:
+            d = _http_get_json(
+                f"{DASHBOARD_URL}/api/tasks?status={status}&limit=200",
+                timeout=3.0,
+            )
+            field = "completed_at" if status != "awaiting_approval" else "created_at"
+            n = 0
+            for t in d.get("items", []):
+                if _utc_to_local_date(t.get(field)) == today:
+                    n += 1
+            counts[status] = n
+            tasks_any_ok = True
+        except Exception as exc:
+            _log(f"tasks?status={status}", exc)
+    metrics["today_counts"] = counts
+
+    # 5. Emergency stop flag. `/api/system/state` returns
+    #   {}                                          ← never set
+    #   {"emergency_stop": {"value": "0|1", ...}}    ← set; "1" = ON
+    try:
+        d = _http_get_json(f"{DASHBOARD_URL}/api/system/state", timeout=3.0)
+        es = d.get("emergency_stop")
+        metrics["emergency_stop"] = bool(
+            isinstance(es, dict) and es.get("value") == "1"
+        )
+    except Exception as exc:
+        _log("system_state", exc)
+        metrics["emergency_stop"] = None
+
+    # Total failure → fallback message. "Total" = every endpoint failed
+    # (no dispatcher, no decisions, no live sessions, no task counts,
+    # no system_state). Mid-failures fall through to the partial template.
+    if (
+        metrics.get("dispatcher") is None
+        and metrics.get("pending_decisions") is None
+        and metrics.get("live_sessions") is None
+        and not tasks_any_ok
+        and metrics.get("emergency_stop") is None
+    ):
+        try:
+            _send_message(
+                "⚠️ status check failed — dashboard server may be down.\n"
+                "Try `cc status` or `cc restart`."
+            )
+        except Exception as exc:
+            print(f"[telegram] /status fallback send failed: {exc!r}", file=sys.stderr)
+        return
+
+    try:
+        _send_message(_format_status(metrics))
+    except Exception as exc:
+        print(f"[telegram] /status send failed: {exc!r}", file=sys.stderr)
+
+
 def _handle_message(msg: dict) -> None:
     """Process a single Telegram message — reply-to or slash-command.
 
-    Routing order (v0.5.0-mvp2):
+    Routing order (v0.5.0-mvp2 + v0.6.1):
       1. reply-to-message → lookup notification_log
          - decision  → POST /api/decisions/{id}/answer  (v0.3.0)
          - inbox     → POST /api/inbox/{id}/reply       (v0.3.0)
          - risk_gated → /approve <task_id>              (v0.5.0-mvp2, FR17)
       2. slash command
+         - /status           → _handle_status           (v0.6.1, Phase 2)
          - /answer | /reply  → existing route_reply     (v0.3.0)
          - /run <prompt>     → _handle_run              (v0.5.0-mvp2, FR1-4)
          - /approve <id>     → _handle_approve          (v0.5.0-mvp2, FR16)
@@ -594,13 +890,20 @@ def _handle_message(msg: dict) -> None:
                 })
                 return
 
-    # 2a. /run <prompt> — free-text remainder, multi-line, no leading ID.
+    # 2a. /status — read-only telemetry snapshot. v0.6.1, Phase 2. Checked
+    # before /run so `/status` with stray args fails fast (regex is
+    # whole-message; `/status foo` won't match and falls through to /help).
+    if _CMD_STATUS_RE.match(text):
+        _handle_status(chat)
+        return
+
+    # 2b. /run <prompt> — free-text remainder, multi-line, no leading ID.
     m_run = _CMD_RUN_RE.match(text)
     if m_run:
         _handle_run(chat, message_id, m_run.group(1))
         return
 
-    # 2b. /answer | /reply | /approve | /cancel — all share a leading int ID.
+    # 2c. /answer | /reply | /approve | /cancel — all share a leading int ID.
     m_cmd = _CMD_WITH_ID_RE.match(text)
     if m_cmd:
         verb = m_cmd.group(1).lower()
@@ -639,7 +942,10 @@ def _handle_message(msg: dict) -> None:
             _handle_cancel(chat, message_id, ref_id)
             return
 
-    # 2c. Bare /run, /approve, /cancel without args → usage hint (NFR11).
+    # 2d. Bare /run, /approve, /cancel without args → usage hint (NFR11).
+    # /status with stray args (e.g. `/status foo`) falls through here too —
+    # the regex is whole-message, so the bare-prefix check doesn't catch it;
+    # it lands in /help below, which is the intended NFR11 behaviour.
     bare = text.lower().split()[0] if text else ""
     if bare == "/run":
         _reply_text(chat, message_id,
@@ -658,6 +964,7 @@ def _handle_message(msg: dict) -> None:
                 "I forward `DECISION:` and `INBOX:` from Claude Code sessions, "
                 "and let you launch / approve / cancel headless tasks from here.\n\n"
                 "*Reply to a notification* with your answer, or use:\n"
+                "`/status` — glanceable snapshot (dispatcher, cost, decisions, live)\n"
                 "`/answer <id> <text>` — answer a pending decision\n"
                 "`/reply <id> <text>` — reply to an inbox message\n"
                 "`/run <prompt>` — queue a new headless task\n"
