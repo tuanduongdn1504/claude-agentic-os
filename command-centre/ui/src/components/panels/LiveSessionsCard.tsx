@@ -4,7 +4,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, Kicker } fro
 import { StatePill } from '@/components/ui/StatePill';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useLiveSessions } from '@/hooks/useQueries';
-import { cwdShort, fmtAgeSeconds } from '@/lib/format';
+import { cwdShort, fmtAgoFromIso } from '@/lib/format';
 import type { SessionRow } from '@/lib/types';
 import { LiveSessionDetail } from './LiveSessionDetail';
 
@@ -53,7 +53,7 @@ export function LiveSessionsCard() {
 }
 
 function LiveRow({ s }: { s: SessionRow }) {
-  const startedAgo = s.started_at ? fmtIso(s.started_at) : 'unknown';
+  const startedAgo = s.started_at ? fmtAgoFromIso(s.started_at) : 'unknown';
   return (
     <div>
       <div className="flex items-start justify-between gap-2 mb-1">
@@ -71,8 +71,3 @@ function LiveRow({ s }: { s: SessionRow }) {
   );
 }
 
-function fmtIso(iso: string): string {
-  const then = Date.parse(iso);
-  if (isNaN(then)) return iso;
-  return fmtAgeSeconds((Date.now() - then) / 1000);
-}

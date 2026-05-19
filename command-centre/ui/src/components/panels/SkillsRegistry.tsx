@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/Badge';
 import { usePatchSkillAutonomy, useSkills } from '@/hooks/useQueries';
 import type { SkillRow } from '@/lib/types';
 import { Select } from '@/components/ui/Field';
-import { fmtAgeSeconds } from '@/lib/format';
+import { fmtAgoFromIso } from '@/lib/format';
 
 const AUTONOMY_TONE: Record<SkillRow['autonomy_level'], 'green' | 'amber' | 'red'> = {
   auto:   'green',
@@ -63,7 +63,7 @@ export function SkillsRegistry() {
                     </td>
                     <td className="py-2 px-3 text-right num">{s.script_count}</td>
                     <td className="py-2 px-3 text-right font-mono text-text-subtle text-[11px]">
-                      {s.last_modified ? fmtIso(s.last_modified) : '—'}
+                      {s.last_modified ? fmtAgoFromIso(s.last_modified) : '—'}
                     </td>
                     <td className="py-2 px-3">
                       <div className="flex items-center gap-2">
@@ -90,8 +90,3 @@ export function SkillsRegistry() {
   );
 }
 
-function fmtIso(iso: string): string {
-  const then = Date.parse(iso);
-  if (isNaN(then)) return iso;
-  return fmtAgeSeconds((Date.now() - then) / 1000);
-}

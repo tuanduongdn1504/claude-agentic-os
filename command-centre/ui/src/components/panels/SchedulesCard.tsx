@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { StatePill } from '@/components/ui/StatePill';
 import { useDeleteSchedule, usePatchSchedule, useSchedules } from '@/hooks/useQueries';
-import { fmtAgeSeconds } from '@/lib/format';
+import { fmtAgoFromIso, fmtDateTimeUTC7 } from '@/lib/format';
 import { CalendarPlus, Power, Trash2 } from 'lucide-react';
 import { ScheduleComposer } from './ScheduleComposer';
 
@@ -58,8 +58,8 @@ export function SchedulesCard() {
                 <div className="flex items-center flex-wrap gap-2 text-[11px] text-text-subtle font-mono mb-2">
                   <Badge tone="cyan">{s.cron_expression}</Badge>
                   {s.assigned_skill && <Badge tone="purple">{s.assigned_skill}</Badge>}
-                  {s.next_run_at && <span>next: {s.next_run_at}</span>}
-                  {s.last_run_at && <span>last: {fmtIso(s.last_run_at)}</span>}
+                  {s.next_run_at && <span title={s.next_run_at}>next: {fmtDateTimeUTC7(s.next_run_at)}</span>}
+                  {s.last_run_at && <span title={s.last_run_at}>last: {fmtAgoFromIso(s.last_run_at)}</span>}
                 </div>
                 <div className="flex items-center gap-1">
                   <Button
@@ -90,8 +90,3 @@ export function SchedulesCard() {
   );
 }
 
-function fmtIso(iso: string): string {
-  const then = Date.parse(iso);
-  if (isNaN(then)) return iso;
-  return fmtAgeSeconds((Date.now() - then) / 1000);
-}

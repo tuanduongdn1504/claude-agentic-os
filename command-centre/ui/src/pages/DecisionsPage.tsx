@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, Kicker } fro
 import { Badge } from '@/components/ui/Badge';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useDecisions, useInbox } from '@/hooks/useQueries';
-import { fmtAgeSeconds } from '@/lib/format';
+import { fmtAgoFromIso } from '@/lib/format';
 import { cn } from '@/lib/cn';
 
 export default function DecisionsPage() {
@@ -108,7 +108,7 @@ function AnsweredList() {
               <div className="flex items-center gap-2 text-[11px] text-text-subtle font-mono">
                 {d.task_id != null && <Badge tone="blue">task #{d.task_id}</Badge>}
                 {d.session_id && <span>session {d.session_id.slice(0, 8)}</span>}
-                <span>· answered {fmtAge(d.answered_at ?? d.created_at)}</span>
+                <span>· answered {fmtAgoFromIso(d.answered_at ?? d.created_at)}</span>
               </div>
             </div>
             <Badge tone="green">answered</Badge>
@@ -124,8 +124,3 @@ function AnsweredList() {
   );
 }
 
-function fmtAge(iso: string): string {
-  const then = Date.parse(iso);
-  if (isNaN(then)) return iso;
-  return fmtAgeSeconds((Date.now() - then) / 1000);
-}

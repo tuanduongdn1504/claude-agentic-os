@@ -8,7 +8,7 @@ import { Textarea, Label } from '@/components/ui/Field';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useAnswerDecision, useDecisions } from '@/hooks/useQueries';
 import type { DecisionRow } from '@/lib/types';
-import { fmtAgeSeconds } from '@/lib/format';
+import { fmtAgoFromIso } from '@/lib/format';
 
 export function DecisionsCard() {
   const { data, isLoading } = useDecisions('pending');
@@ -48,7 +48,7 @@ export function DecisionsCard() {
                 <div className="flex items-start justify-between gap-3 mb-1">
                   <div className="text-[13px] text-text line-clamp-2 flex-1">{d.prompt}</div>
                   <span className="text-[11px] font-mono text-text-subtle whitespace-nowrap">
-                    {fmtAge(d.created_at)}
+                    {fmtAgoFromIso(d.created_at)}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 text-[11px] text-text-subtle font-mono">
@@ -65,11 +65,6 @@ export function DecisionsCard() {
   );
 }
 
-function fmtAge(iso: string): string {
-  const then = Date.parse(iso);
-  if (isNaN(then)) return iso;
-  return fmtAgeSeconds((Date.now() - then) / 1000);
-}
 
 function AnswerModal({ decision, onClose }: { decision: DecisionRow | null; onClose: () => void }) {
   const [answer, setAnswer] = useState('');
