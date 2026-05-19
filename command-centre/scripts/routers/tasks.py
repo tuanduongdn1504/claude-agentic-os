@@ -41,7 +41,8 @@ async def list_tasks(status: Optional[str] = None, quadrant: Optional[str] = Non
                    execution_mode, scheduled_for, requires_approval, risk_level,
                    dry_run, quadrant, approved_at, session_id, started_at,
                    completed_at, duration_ms, cost_usd, output_summary, error_message,
-                   consecutive_failures, created_at
+                   consecutive_failures, created_at,
+                   COALESCE(cost_source, 'unknown') AS cost_source
             FROM ops_tasks
             WHERE {' AND '.join(clauses)}
             ORDER BY
@@ -84,6 +85,8 @@ async def create_task(request: Request) -> dict[str, Any]:
         "risk_level": p.get("risk_level"),
         "dry_run": int(bool(p.get("dry_run", False))),
         "quadrant": quadrant,
+        # v0.6.0 — every dispatcher-bound task is api_pool spend.
+        "cost_source": "api_pool",
     }
     keys = ", ".join(fields.keys())
     marks = ", ".join(f":{k}" for k in fields)

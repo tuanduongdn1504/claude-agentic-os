@@ -1,82 +1,147 @@
 # Changelog
 
-## v0.6.0 — DRAFT spec: SkillLauncher + cost-source disambiguation
+## v0.6.0 — SkillLauncher + cost-source disambiguation
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.0-amendment.md`,
-applied on top of the v0.5.0-mvp1 working tree (current `main` HEAD).
+applied on top of the v0.5.0-mvp1 working tree. Additive — no breaking
+changes to existing endpoints, no row drops, idempotent migration.
+Re-running `install.sh` against an existing v0.5.x install upgrades the
+schema in place and preserves every row.
 
-Note: v0.4.0 (operator UI — Sessions Explorer, Decisions Queue, Telegram
-bridge status) and v0.5.0-mvp1 (Telegram outbound: task_complete +
-risk_gated push) shipped in git after v0.3.2 but were not backfilled into
-this CHANGELOG. Commit messages are the current record; backfill is
-queued alongside the v0.6.0 build.
+### What ships
 
-### Why this release
-
-Two gaps in the current build.
-
-**Workflow.** Queuing a skill today means opening TaskComposer and filling
-eight fields, every time. Skills you run daily (morning brief, deep
-research, inbox triage) should be one click — same task, sensible defaults,
-fire-and-forget.
-
-**Observability.** As of Anthropic's recent billing change, headless
-`claude -p` no longer draws from Pro/Max — it pulls from a separate ~$200/mo
-API pool at full API rates (~10× the Max-subsidised cost). The dashboard
-mixes both streams into a single `cost_usd` today, which makes the v0.2.0
-daily cost cap dollar-blind.
-
-### What's planned
-
-- **`SkillLauncher` panel** on the Command page. One-click launch per
-  `user_invocable` skill with stored presets, last-launched timestamp,
-  30-day avg cost, inline preset editor. Fires via new endpoint
-  `POST /api/skills/{name}/launch` → optimistic UI → dispatcher triggered
-  inline (no 120s wait for next heartbeat).
-- **`cost_source` enum** (`api_pool` / `max_sub` / `unknown`, with
-  `codex_api` slot reserved for a future release) on `ops_tasks` + `sessions`.
-  Dispatcher and launcher write `api_pool`; `sync_sessions.py` derives
-  `max_sub` for interactive REPL/IDE sessions via a left-join against
-  `ops_tasks`. Race covered by a two-line back-fill in
-  `task_tracker.claim_pending`.
-- **`MISSION_CONTROL_DAILY_COST_CAP_USD` re-pointed to api_pool only.**
-  Max-sub cost is notional for Pro/Max operators; capping on it would
-  surprise users. The cap exists to protect real-dollar spend.
-- **UI splits** — KpiRow cost tile shows `api $X · max $Y`; DispatcherStrip
-  reads `today api / cap`; SessionsTable gains a Source column + filter;
-  TaskBoard cards gain a small source pill; TokenUsageCard gains a per-day
-  cost band beneath the token stacks.
-- **Pre-v0.6 rows** surface as amber `?` tags everywhere. `cc doctor`
-  reports a non-fatal warning. Manual recourse documented in HANDOVER.md.
+- **`SkillLauncher` panel** on the Command page (between Token usage and
+  Observability, inside `CollapsibleSection id="launcher"`). Renders
+  `user_invocable=1` skills as a 3-col grid, sorted by `launch_count`
+  desc → `last_launched_at` desc → name. Each card shows the skill name,
+  preset title, 30-day avg cost, last-launched age, a primary **Launch**
+  button (optimistic spinner → `↗ Task #N` chip for 2.5s), and a pencil
+  that expands an inline preset editor in-place — not a Sheet, not a
+  Modal. Esc cancels. Empty state teaches the operator how to mark a
+  skill `user_invocable: true` and run `cc sync`.
+- **New endpoints** —
+  `POST /api/skills/{name}/launch` (one-click run; defaults via the
+  preset → frontmatter → hardcoded-default fallback chain; cost_source
+  hard-coded to `'api_pool'`; pokes the dispatcher inline so the task
+  starts within ~1s instead of waiting for the next 120s heartbeat) and
+  `PATCH /api/skills/{name}/preset` (replace, not merge — `null` clears).
+  `GET /api/skills` rows now include `preset`, `last_launched_at`,
+  `launch_count`, `avg_cost_usd_30d`.
+- **`cost_source` enum** (`api_pool` | `max_sub` | `unknown`,
+  `codex_api` slot reserved for a future backend swap and accepted by
+  the validator from day one) on `ops_tasks` + `sessions`. Dispatcher
+  and launcher write `api_pool` (belt-and-braces UPDATE in `run_once`
+  for pre-migration pending rows); `sync_sessions._derive_cost_source`
+  pins `max_sub` for interactive REPL/IDE sessions via a left-join
+  against `ops_tasks`. Race covered by a two-line back-fill in
+  `task_tracker.update_task` whenever the dispatcher stashes a
+  `session_id`.
+- **Cost-split endpoints, backwards-compatible.** Every cost-bearing
+  endpoint keeps its existing top-level `cost_usd` total and adds a
+  `cost_by_source` sibling `{api_pool, max_sub, unknown}`:
+  - `GET /api/summary` — today rollup
+  - `GET /api/usage/tokens` — per daily row + window total
+  - `GET /api/system/dispatcher` — adds
+    `today_cost_api_pool_usd`, `today_cost_max_sub_usd`,
+    `today_cost_unknown_usd`
+  - `GET /api/sessions` — each row gains `cost_source`; new
+    `?cost_source=` filter param
+  - `GET /api/tasks` — each row gains `cost_source`
+- **`MISSION_CONTROL_DAILY_COST_CAP_USD` reads api_pool only.** Both
+  the dispatcher's `_today_cost_usd()` and the `AttentionBar`
+  `cost_capped` issue derive cap state from
+  `cost_source='api_pool' AND DATE(completed_at,'localtime')=today`.
+  Max-sub spend (Pro/Max-subsidised interactive sessions) is no longer
+  rolled into the cap math — capping on it would surprise users who
+  don't pay per-token interactively. Issue copy: "API-pool spend reached
+  cap ($X.XX of $Y.YY today). Max-sub usage continues."
+- **UI splits** —
+  - **KpiRow** cost tile gains a second line `api $X.XX · max $Y.YY`
+    in JetBrains Mono, dim; an amber `? $Z.ZZ` appended when unknown
+    spend exists today. Line 2 is omitted entirely when the day total
+    is zero (no visual noise on an empty tile).
+  - **DispatcherStrip** cost segment reads `today api $X.XX / cap $Y.YY`
+    (was `today $cost / cap`). Tone tracking unchanged.
+  - **TokenUsageCard** gains a thin per-day cost band beneath the
+    token stacks: two stacked mini-bars per day (cyan = api_pool,
+    grey = max_sub), ~6px tall, hover tooltip showing the per-day
+    triplet. Band hides when both subtotals are zero for the full window.
+  - **Sessions list** (`SessionsPage` at `/sessions` + the legacy
+    `SessionsTable` on `/activity`) gains a **Source** column between
+    Model and Tokens with `api` (cyan) / `max` (grey) / `?` (amber)
+    pills, plus an `all/api/max/?` filter toolbar.
+  - **TaskBoard** cards gain a small source pill next to the risk
+    pill. Hidden when the task is `pending`/`awaiting_approval` AND
+    `cost_usd IS NULL` (don't clutter cards with placeholder pills).
+- **`cc doctor`** gains `cost_source backfill` check: PASS when zero
+  ended sessions still read `'unknown'`; WARN (non-fatal) when pre-v0.6
+  rows exist — they surface as amber `?` tags in the UI and stay
+  unguessed. Manual recourse documented in HANDOVER.md.
 
 ### Schema delta
 
 Five columns total across three tables, all through the existing
-`_migrate_add_column` helper:
+`_migrate_add_column` helper. Re-runnable; existing rows on all three
+tables get `'unknown'` / `NULL` / `0` on first boot.
 
 | Table | Column | Type | Default |
 |---|---|---|---|
 | `skills` | `preset_json` | TEXT | NULL |
 | `skills` | `last_launched_at` | TEXT | NULL |
-| `skills` | `launch_count` | INTEGER | `0` |
-| `ops_tasks` | `cost_source` | TEXT | `'unknown'` |
-| `sessions` | `cost_source` | TEXT | `'unknown'` |
+| `skills` | `launch_count` | INTEGER NOT NULL | `0` |
+| `ops_tasks` | `cost_source` | TEXT NOT NULL | `'unknown'` |
+| `sessions` | `cost_source` | TEXT NOT NULL | `'unknown'` |
 
-Idempotent. Re-running `install.sh` against v0.5.x upgrades in place,
-preserves all rows.
+### Verified
 
-### Status
+- Migration: fresh DB → `init_db()` + two consecutive `apply_migrations()`
+  calls clean, all 5 columns present, defaults applied.
+- `tsc --noEmit` clean. `vite build` 524KB / 156KB gzipped.
+- `cc doctor`: PASS path renders `cost-source backfill complete — 0 rows
+  pending`; WARN path renders the pre-v0.6 row count with the manual-
+  recourse pointer.
+- Playwright (`tests/e2e/v0.6.spec.ts`, 7 specs against
+  `page.route` fixtures): KpiRow two-source readout renders + hides on
+  zero-total; SkillLauncher sorts by launch_count and filters out
+  non-invocable skills; one-click launch POSTs to
+  `/api/skills/{name}/launch` and surfaces the `↗ Task #N` chip;
+  preset edit round-trips across a page reload; sessions-list filter
+  narrows the request `cost_source` param and re-renders.
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+### Operator flow
 
-Review before kicking off the build. Open design questions called out
-inline in the amendment file (preset JSON blob vs nine columns, launcher
-default `classic` vs composer default `stream`, cap reads api_pool only,
-`codex_api` slot reserved for a future release).
+```bash
+# Existing v0.5.x install — just restart, migration runs in lifespan.
+cc restart
+cc doctor                  # cost-source backfill should be ok or warn
+
+# Mark a skill invocable.
+# Add `user_invocable: true` to its frontmatter, then:
+cc sync
+
+# Open the dashboard → "Skill launcher" section now shows the skill.
+# Click Launch — task transitions pending → running → done without
+# ever opening TaskComposer.
+```
+
+### Tunables (env vars or .env)
+
+No new env vars. The cap variable + default-model variable are unchanged
+from v0.2.0:
+
+| Var | Default | What changed in v0.6.0 |
+|---|---|---|
+| `MISSION_CONTROL_DAILY_COST_CAP_USD` | unset = off | Now reads `api_pool` cost only |
+| `MISSION_CONTROL_DEFAULT_MODEL` | unset | Used as launcher's final fallback when preset has no model |
+
+### Not in this release (deferred)
+
+- **Codex backend.** `cost_source='codex_api'` is reserved in the
+  validator; backend pluggability is a future change with its own brief.
+- **Per-skill cost budgets.** Different concept from the daily cap.
+- **Obsidian embed mode** (`/embed` route).
+- **Automatic backfill heuristics** for pre-v0.6 `unknown` rows.
 
 ---
 

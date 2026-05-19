@@ -120,6 +120,15 @@ def update_task(task_id: int, **fields: Any) -> None:
             f"UPDATE ops_tasks SET {set_clause} WHERE id = :id",
             {**fields, "id": task_id},
         )
+        # v0.6.0 — back-fill cost_source on the sessions row the dispatcher
+        # just linked. Covers the race where sync_sessions processes lines
+        # before ops_tasks.session_id is written.
+        sid = fields.get("session_id")
+        if sid:
+            conn.execute(
+                "UPDATE sessions SET cost_source='api_pool' WHERE session_id=?",
+                (sid,),
+            )
 
 
 def complete_task(task_id: int, output_summary: str | None = None,

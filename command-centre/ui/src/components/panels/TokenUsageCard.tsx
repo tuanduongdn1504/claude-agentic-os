@@ -3,7 +3,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, Kicker } fro
 import { Skeleton } from '@/components/ui/Skeleton';
 import { useUsageTokens } from '@/hooks/useQueries';
 import type { Range } from '@/lib/api';
-import { fmtCount } from '@/lib/format';
+import { fmtCount, fmtUsd } from '@/lib/format';
 
 const RANGES: Range[] = ['today', '7d', '30d'];
 
@@ -16,17 +16,31 @@ export function TokenUsageCard() {
   const daily = data?.daily ?? [];
 
   // Aggregate per day for the stacked bar (the API row is per model).
-  const byDay = new Map<string, { in: number; out: number; cr: number; cc: number }>();
+  // v0.6.0 — also capture per-day cost split by source. token_usage is
+  // per-model so each model row repeats the same date's cost_by_source;
+  // we take the first non-zero seen rather than summing to avoid double-
+  // counting. (Backend ships the same blob on every model row for a date.)
+  type DayBucket = { in: number; out: number; cr: number; cc: number;
+                     api: number; max: number; unk: number };
+  const byDay = new Map<string, DayBucket>();
   for (const r of daily) {
-    const b = byDay.get(r.date) ?? { in: 0, out: 0, cr: 0, cc: 0 };
+    const b = byDay.get(r.date) ?? { in: 0, out: 0, cr: 0, cc: 0, api: 0, max: 0, unk: 0 };
     b.in += r.input_tokens || 0;
     b.out += r.output_tokens || 0;
     b.cr += r.cache_read_tokens || 0;
     b.cc += r.cache_create_tokens || 0;
+    const cbs = r.cost_by_source;
+    if (cbs) {
+      b.api = Math.max(b.api, cbs.api_pool || 0);
+      b.max = Math.max(b.max, cbs.max_sub  || 0);
+      b.unk = Math.max(b.unk, cbs.unknown  || 0);
+    }
     byDay.set(r.date, b);
   }
   const dayEntries = Array.from(byDay.entries()).sort((a, b) => a[0].localeCompare(b[0]));
   const max = Math.max(1, ...dayEntries.map(([, v]) => v.in + v.out + v.cr + v.cc));
+  const costMax = Math.max(0, ...dayEntries.map(([, v]) => v.api + v.max));
+  const hasCost = costMax > 0;
 
   return (
     <Card>
@@ -75,11 +89,47 @@ export function TokenUsageCard() {
             );
           })}
         </div>
-        <div className="mt-3 flex items-center gap-4 text-[11px] font-mono text-text-subtle">
+        {hasCost && (
+          <div className="mt-1 pt-1 h-[16px] flex items-end gap-1.5" aria-label="per-day cost by source">
+            {dayEntries.map(([day, v]) => {
+              const total = v.api + v.max;
+              if (total <= 0) {
+                return <div key={day} className="flex-1 h-full" />;
+              }
+              const apiH = (v.api / costMax) * 100;
+              const maxH = (v.max / costMax) * 100;
+              return (
+                <div key={day} className="flex-1 h-full flex flex-col justify-end group relative">
+                  <div className="w-full flex flex-col justify-end">
+                    <Seg h={v.max / Math.max(total, 1) * (total / costMax)} cls="bg-text-subtle/70" />
+                    <Seg h={v.api / Math.max(total, 1) * (total / costMax)} cls="bg-accent-cyan/85 rounded-b-[2px]" />
+                  </div>
+                  <div className="absolute inset-x-0 bottom-full opacity-0 group-hover:opacity-100 transition-opacity flex justify-center pointer-events-none">
+                    <div className="mb-1 px-2 py-1 rounded-md bg-surface-3 border border-border text-[11px] font-mono whitespace-nowrap shadow-lg">
+                      {day} · api {fmtUsd(v.api)} · max {fmtUsd(v.max)}
+                      {v.unk > 0 && <> · ? {fmtUsd(v.unk)}</>}
+                    </div>
+                  </div>
+                  <div className="sr-only">
+                    {day} api {v.api.toFixed(4)} max {v.max.toFixed(4)} unknown {v.unk.toFixed(4)} ({apiH.toFixed(0)}/{maxH.toFixed(0)}%)
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="mt-3 flex items-center gap-4 text-[11px] font-mono text-text-subtle flex-wrap">
           <Legend color="bg-accent-blue"   label="input" />
           <Legend color="bg-accent-purple" label="output" />
           <Legend color="bg-accent-cyan"   label="cache-read" />
           <Legend color="bg-status-amber"  label="cache-create" />
+          {hasCost && (
+            <>
+              <span className="text-text-subtle/50">·</span>
+              <Legend color="bg-accent-cyan/85"   label="api $" />
+              <Legend color="bg-text-subtle/70"  label="max $" />
+            </>
+          )}
         </div>
       </CardContent>
     </Card>

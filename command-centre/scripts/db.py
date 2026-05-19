@@ -376,12 +376,15 @@ def _migrate_add_column(conn: sqlite3.Connection, table: str, col: str, coltype:
 
 
 def apply_migrations() -> None:
-    """Runtime migrations for schema drift across updates. No-op on a fresh
-    DB since SCHEMA already defines all the columns. Kept for future use."""
+    """Runtime migrations for schema drift across updates. Re-runnable —
+    idempotent against any v0.x install."""
     with connect() as conn:
-        # Example shape — no actual drift yet. Uncomment as the schema evolves:
-        # _migrate_add_column(conn, "sessions", "new_col", "TEXT")
-        pass
+        # v0.6.0 — SkillLauncher + cost-source disambiguation.
+        _migrate_add_column(conn, "skills",    "preset_json",      "TEXT")
+        _migrate_add_column(conn, "skills",    "last_launched_at", "TEXT")
+        _migrate_add_column(conn, "skills",    "launch_count",     "INTEGER NOT NULL DEFAULT 0")
+        _migrate_add_column(conn, "ops_tasks", "cost_source",      "TEXT NOT NULL DEFAULT 'unknown'")
+        _migrate_add_column(conn, "sessions",  "cost_source",      "TEXT NOT NULL DEFAULT 'unknown'")
 
 
 # ---------------------------------------------------------------------------

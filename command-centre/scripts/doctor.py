@@ -162,6 +162,43 @@ def chk_launchctl(label: str) -> Result:
     return Result("warn", f"{label} not loaded (run `launchctl load` via install.sh)")
 
 
+def chk_cost_source_backfill() -> Result:
+    """v0.6.0 — count sessions stuck on cost_source='unknown' that already
+    ended. Fresh installs have 0. Pre-v0.6 installs surface these as amber
+    `?` tags in the UI and we don't auto-guess (see HANDOVER.md)."""
+    import sqlite3
+    # Locate the DB. Prefer CC_INSTALL_DIR/data/command-centre.db (where
+    # install.sh puts it); fall back to the dev path under the source tree.
+    install_dir = Path(os.environ.get("CC_INSTALL_DIR") or
+                       Path.home() / ".command-centre")
+    db_path = install_dir / "data" / "command-centre.db"
+    if not db_path.exists():
+        # Dev / pre-install — nothing to verify yet.
+        return Result("skip", f"db missing at {db_path} — not installed yet")
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3)
+        # Schema may pre-date v0.6.0 if doctor runs against a frozen DB.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        if "cost_source" not in cols:
+            conn.close()
+            return Result("warn", "sessions.cost_source missing — server hasn't booted v0.6 migration yet")
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE COALESCE(cost_source,'unknown')='unknown' AND ended_at IS NOT NULL"
+        ).fetchone()
+        pending = int(row[0]) if row else 0
+        conn.close()
+    except Exception as exc:
+        return Result("error", f"db probe failed: {exc}")
+    if pending == 0:
+        return Result("ok", "cost-source backfill complete — 0 rows pending")
+    return Result(
+        "warn",
+        f"cost-source backfill — {pending} pre-v0.6 row(s) still 'unknown'; "
+        "they'll surface as amber ? tags in the UI. See HANDOVER.md for manual recourse.",
+    )
+
+
 def chk_telegram() -> Result:
     tok = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not tok:
@@ -194,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         Check("CC_PROJECT_ROOT",  chk_cc_project_root, critical=False),
         Check("dashboard port",   lambda: chk_port_open(args.host, args.port), critical=True),
         Check("system health",    lambda: chk_system_health(base), critical=True),
+        Check("cost_source backfill", chk_cost_source_backfill, critical=False),
         Check("launchd · mc",     lambda: chk_launchctl("com.commandcentre.mission-control"), critical=False),
         Check("launchd · telegram", lambda: chk_launchctl("com.commandcentre.telegram-bot"), critical=False),
         Check("telegram",         chk_telegram, critical=False),

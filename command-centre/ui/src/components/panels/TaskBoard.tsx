@@ -10,6 +10,7 @@ import {
 import type { TaskQuadrant, TaskRow, TaskStatus } from '@/lib/types';
 import { fmtMs, fmtUsd } from '@/lib/format';
 import { CheckCircle2, Play, RotateCcw, Trash2, Zap } from 'lucide-react';
+import { CostSourcePill } from './CostSourceUI';
 
 type Column = { key: 'queue' | 'running' | 'done'; label: string; statuses: TaskStatus[] };
 const COLUMNS: Column[] = [
@@ -135,6 +136,11 @@ function TaskCard({ task }: { task: TaskRow }) {
         {task.risk_level && task.risk_level !== 'low' && (
           <Badge tone={task.risk_level === 'high' ? 'red' : 'amber'}>{task.risk_level}</Badge>
         )}
+        {/* v0.6.0 — hide the pill on pending/awaiting tasks until cost lands. */}
+        {!(
+          (task.status === 'pending' || task.status === 'awaiting_approval')
+          && task.cost_usd == null
+        ) && <CostSourcePill source={task.cost_source} size="xs" />}
       </div>
 
       {(task.duration_ms != null || task.cost_usd != null) && (

@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import * as api from '@/lib/api';
 import type { Range } from '@/lib/api';
+import type { SkillPreset } from '@/lib/types';
 
 const POLL_5S = 5_000;
 const POLL_10S = 10_000;
@@ -167,6 +168,27 @@ export function usePatchSkillAutonomy() {
     mutationFn: (args: { name: string; level: 'auto' | 'review' | 'manual' }) =>
       api.patchSkillAutonomy(args.name, args.level),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['skills'] }),
+  });
+}
+// v0.6.0 launcher mutations.
+export function usePatchSkillPreset() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; preset: SkillPreset | null }) =>
+      api.patchSkillPreset(args.name, args.preset),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['skills'] }),
+  });
+}
+export function useLaunchSkill() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; description_override?: string }) =>
+      api.launchSkill(args.name, { description_override: args.description_override }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tasks'] });
+      qc.invalidateQueries({ queryKey: ['skills'] });
+      qc.invalidateQueries({ queryKey: ['dispatcher-state'] });
+    },
   });
 }
 export function usePostLiveMessage() {

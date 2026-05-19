@@ -8,9 +8,10 @@ import { LiveSessionDetail } from '@/components/panels/LiveSessionDetail';
 import { RangePicker } from '@/components/panels/TokenUsageCard';
 import * as api from '@/lib/api';
 import type { Range } from '@/lib/api';
-import type { SessionRow } from '@/lib/types';
+import type { CostSource, SessionRow } from '@/lib/types';
 import { cwdShort, fmtMs, fmtUsd, fmtTimeUTC7, localDateUTC7 } from '@/lib/format';
 import { cn } from '@/lib/cn';
+import { CostSourcePill, CostSourceFilter } from '@/components/panels/CostSourceUI';
 
 function toLocalDate(iso: string | null): string {
   return localDateUTC7(iso);
@@ -38,10 +39,14 @@ export default function SessionsPage() {
   const [q, setQ] = useState('');
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
   const [activeSession, setActiveSession] = useState<string | null>(null);
+  const [costFilter, setCostFilter] = useState<CostSource | 'all'>('all');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['sessions-explorer', range],
-    queryFn: () => api.listSessions({ range, limit: 500 }),
+    queryKey: ['sessions-explorer', range, costFilter],
+    queryFn: () => api.listSessions({
+      range, limit: 500,
+      cost_source: costFilter === 'all' ? undefined : costFilter,
+    }),
     refetchInterval: 60_000,
   });
 
@@ -118,8 +123,8 @@ export default function SessionsPage() {
 
       {/* Right: session timeline */}
       <div className="flex-1 flex flex-col gap-3 overflow-hidden min-w-0">
-        <div className="flex items-center gap-3 flex-shrink-0">
-          <div className="relative flex-1">
+        <div className="flex items-center gap-3 flex-shrink-0 flex-wrap">
+          <div className="relative flex-1 min-w-[200px]">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle pointer-events-none" />
             <Input
               value={q}
@@ -128,6 +133,7 @@ export default function SessionsPage() {
               className="!pl-7 !h-8 !text-[12px] w-full"
             />
           </div>
+          <CostSourceFilter value={costFilter} onChange={setCostFilter} />
           <RangePicker value={range} onChange={setRange} />
         </div>
 
@@ -212,6 +218,7 @@ function SessionItem({ session: s, onClick }: { session: SessionRow; onClick: ()
         </div>
       </div>
       <div className="flex items-center gap-2 flex-shrink-0 text-text-dim">
+        <CostSourcePill source={s.cost_source} />
         {s.duration_ms != null && <span className="num text-[12px]">{fmtMs(s.duration_ms)}</span>}
         <span className="num text-[12px]">{fmtUsd(s.cost_usd)}</span>
         <Badge tone={tone}>{status}</Badge>

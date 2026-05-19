@@ -14,10 +14,14 @@ test.describe('Command Centre shell', () => {
     await page.goto('/');
     await page.getByRole('link', { name: /activity/i }).click();
     await expect(page).toHaveURL(/\/activity$/);
-    await expect(page.getByText(/All sessions/i)).toBeVisible();
+    // Scope to the section's toggle button — both `All sessions` and
+    // `MCP servers` appear inside CollapsibleSections, and `All sessions`
+    // also renders as a CardTitle on /activity (causing strict-mode
+    // collisions). The button is the canonical, single-element handle.
+    await expect(page.getByRole('button', { name: /All sessions/i })).toBeVisible();
     await page.getByRole('link', { name: /skills/i }).click();
     await expect(page).toHaveURL(/\/skills$/);
-    await expect(page.getByText(/MCP servers/i)).toBeVisible();
+    await expect(page.getByRole('button', { name: /MCP servers/i })).toBeVisible();
   });
 
   test('Command palette opens with ⌘K', async ({ page }) => {

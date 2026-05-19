@@ -21,6 +21,7 @@ import { SchedulesCard } from '@/components/panels/SchedulesCard';
 import { DecisionsCard } from '@/components/panels/DecisionsCard';
 import { InboxCard } from '@/components/panels/InboxCard';
 import { HeatmapGrid } from '@/components/panels/HeatmapGrid';
+import { SkillLauncher } from '@/components/panels/SkillLauncher';
 
 export default function CommandPage() {
   const [composerOpen, setComposerOpen] = useState(false);
@@ -54,6 +55,15 @@ export default function CommandPage() {
 
       <CollapsibleSection id="usage" title="Usage" subtitle="tokens, cache, cost" defaultOpen>
         <TokenUsageCard />
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        id="launcher"
+        title="Skill launcher"
+        subtitle="one-click runs · headless · api_pool spend"
+        defaultOpen
+      >
+        <SkillLauncher />
       </CollapsibleSection>
 
       <CollapsibleSection id="observability-quality" title="Observability · quality" subtitle="cache + outcomes">
