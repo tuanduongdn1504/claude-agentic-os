@@ -406,6 +406,8 @@ def _upsert_session(conn: sqlite3.Connection, agg: SessionAgg, ended_at: str | N
             (agg.session_id, _scalar(agg.title), agg.title_source),
         )
 
+    _derive_cost_source(conn, agg.session_id)
+
     conn.execute("DELETE FROM tool_calls WHERE session_id = ?", (agg.session_id,))
     if agg.tool_calls:
         conn.executemany(
@@ -435,6 +437,23 @@ def _upsert_session(conn: sqlite3.Connection, agg: SessionAgg, ended_at: str | N
             """,
             agg.system_events,
         )
+
+
+def _derive_cost_source(conn: sqlite3.Connection, session_id: str) -> None:
+    """Tag the session row as api_pool (dispatcher-launched, real-dollar
+    billing) or max_sub (interactive REPL/IDE, Pro/Max subsidised) by
+    checking for a matching ops_tasks row. Idempotent — safe to call
+    every sync tick. Race with the dispatcher's session_id back-fill is
+    handled by a second update inside task_tracker.claim_pending."""
+    row = conn.execute(
+        "SELECT 1 FROM ops_tasks WHERE session_id = ? LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    source = "api_pool" if row else "max_sub"
+    conn.execute(
+        "UPDATE sessions SET cost_source = ? WHERE session_id = ?",
+        (source, session_id),
+    )
 
 
 def _merge_daily(conn: sqlite3.Connection, daily: dict[tuple[str, str, str], list[int]]) -> None:

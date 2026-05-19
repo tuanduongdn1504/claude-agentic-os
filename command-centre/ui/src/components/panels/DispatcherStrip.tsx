@@ -17,9 +17,11 @@ export function DispatcherStrip() {
   }
 
   const slotsTone = data.back_pressure ? 'warn' : data.running > 0 ? 'info' : 'idle';
+  // v0.6.0 — cap is api_pool only. Max-sub cost no longer triggers warn.
+  const apiCost = data.today_cost_api_pool_usd ?? 0;
   const costTone =
     data.cost_capped ? 'error'
-    : data.daily_cost_cap_usd && data.today_cost_usd / data.daily_cost_cap_usd > 0.8 ? 'warn'
+    : data.daily_cost_cap_usd && apiCost / data.daily_cost_cap_usd > 0.8 ? 'warn'
     : 'idle';
   const riskTone = data.hard_risk_gate
     ? data.risk_gated_today > 0 ? 'warn' : 'ok'
@@ -35,11 +37,11 @@ export function DispatcherStrip() {
       <StatePill tone={costTone}>
         {data.daily_cost_cap_usd != null ? (
           <>
-            today {fmtUsd(data.today_cost_usd)} / cap {fmtUsd(data.daily_cost_cap_usd)}
+            today api {fmtUsd(apiCost)} / cap {fmtUsd(data.daily_cost_cap_usd)}
             {data.cost_capped && ' · capped'}
           </>
         ) : (
-          <>today {fmtUsd(data.today_cost_usd)} · no cap</>
+          <>today api {fmtUsd(apiCost)} · no cap</>
         )}
       </StatePill>
 

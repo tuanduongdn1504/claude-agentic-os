@@ -1,5 +1,7 @@
 // Types — mirror the FastAPI response shapes hit by /api/*.
 
+// Multi-account split (WIP from claude/hopeful-borg-062f4e). Populated by the
+// backend's `by_account` rollup keyed by account_id.
 export interface AccountSummaryRow {
   label: string;
   sessions: number;
@@ -7,13 +9,25 @@ export interface AccountSummaryRow {
   cost_usd: number;
 }
 
+// v0.6.0 — cost-source enum. `codex_api` slot reserved for a future
+// backend swap; not produced anywhere in this release.
+export type CostSource = 'api_pool' | 'max_sub' | 'unknown' | 'codex_api';
+export interface CostBySource {
+  api_pool: number;
+  max_sub: number;
+  unknown: number;
+  codex_api?: number;
+}
+
 export interface Summary {
   sessions_today: number;
   effective_tokens_today: number;
   errors_today: number;
   cost_usd_today: number;
+  cost_by_source: CostBySource;
   tools_today: number;
-  cost_by_source?: { api_pool: number; max_sub: number; unknown: number };
+  // WIP — populated only when the backend ships the multi-account UI surface
+  // (currently only in the installed deploy, not on main).
   by_account?: Record<string, AccountSummaryRow>;
 }
 
@@ -51,6 +65,7 @@ export interface SessionRow {
   total_tokens: number;
   effective_tokens: number;
   cost_usd: number;
+  cost_source: CostSource;
   error_count: number;
   is_error_any: number;
   rate_limit_hit?: number;
@@ -95,10 +110,12 @@ export interface DailyTokenRow {
   date: string; model: string; source: string;
   input_tokens: number; output_tokens: number;
   cache_read_tokens: number; cache_create_tokens: number;
+  cost_by_source: CostBySource;
 }
 export interface UsageTokens {
   range: string; daily: DailyTokenRow[];
   totals: { input: number; output: number; cache_read: number; cache_create: number; total: number };
+  cost_by_source: CostBySource;
 }
 
 export interface UsageCacheDay {
@@ -181,10 +198,26 @@ export interface McpToolRow {
 export interface McpTools { range: string; server: string; items: McpToolRow[]; }
 
 // -- Skills --
+export interface SkillPreset {
+  title?: string;
+  description?: string;
+  model?: string;
+  execution_mode?: TaskMode;
+  priority?: number;
+  quadrant?: TaskQuadrant;
+  risk_level?: 'low' | 'medium' | 'high';
+  requires_approval?: boolean;
+  dry_run?: boolean;
+}
 export interface SkillRow {
   name: string; environment: string; description: string; path: string;
   autonomy_level: 'auto' | 'review' | 'manual'; user_invocable: number;
   script_count: number; last_modified: string | null;
+  // v0.6.0 — launcher.
+  preset: SkillPreset | null;
+  last_launched_at: string | null;
+  launch_count: number;
+  avg_cost_usd_30d: number | null;
 }
 export interface SkillsList { items: SkillRow[]; count: number; }
 export interface SkillEconomicsRow {
@@ -226,7 +259,8 @@ export interface TaskRow {
   dry_run: number; quadrant: TaskQuadrant | null; approved_at: string | null;
   session_id: string | null; started_at: string | null;
   completed_at: string | null; duration_ms: number | null;
-  cost_usd: number | null; output_summary: string | null; error_message: string | null;
+  cost_usd: number | null; cost_source: CostSource;
+  output_summary: string | null; error_message: string | null;
   consecutive_failures: number; created_at: string;
 }
 export interface TasksList { items: TaskRow[]; count: number; }
@@ -263,6 +297,10 @@ export interface DispatcherState {
   back_pressure: boolean;
   daily_cost_cap_usd: number | null;
   today_cost_usd: number;
+  // v0.6.0 — split by cost_source. Cap reads api_pool only.
+  today_cost_api_pool_usd: number;
+  today_cost_max_sub_usd: number;
+  today_cost_unknown_usd: number;
   cost_capped: boolean;
   hard_risk_gate: boolean;
   risk_gated_today: number;

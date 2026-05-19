@@ -1,11 +1,13 @@
 // Typed fetch wrappers over /api/*.
 
 import type {
-  ActivityHeatmap, AgentFanout, AttentionFeed, ContextHealth, DecisionsList,
+  ActivityHeatmap, AgentFanout, AttentionFeed, ContextHealth, CostSource,
+  DecisionsList,
   DispatcherState, EditDecisions, FirehoseEvent, HookActivity, InboxList,
   LiveSessionsList, LiveSessionState, McpServers, McpTools, ProjectBreakdown,
   Productivity, SchedulesList, ScheduleRuns, SessionDetails, SessionFailure,
-  SessionList, SessionOutcomes, SkillsEconomics, SkillsList, Sparklines,
+  SessionList, SessionOutcomes, SkillPreset, SkillRow, SkillsEconomics,
+  SkillsList, Sparklines,
   Summary, SystemHealth, SystemPressure, TasksList, TelegramStatus, ToolLatency,
   UsageCache, UsageTokens,
 } from './types';
@@ -54,7 +56,10 @@ export const emergencyResume = () =>
   j<{ resumed: boolean }>('/api/system/emergency-resume', { method: 'POST' });
 
 // -- Sessions --
-export const listSessions = (p: { range?: Range; source?: string; model?: string; limit?: number; offset?: number; q?: string } = {}) =>
+export const listSessions = (p: {
+  range?: Range; source?: string; model?: string; cost_source?: CostSource;
+  limit?: number; offset?: number; q?: string;
+} = {}) =>
   j<SessionList>(`/api/sessions${qs(p)}`);
 export const liveSessions = () => j<LiveSessionsList>('/api/sessions/live');
 export const sessionDetails = (id: string) => j<SessionDetails>(`/api/sessions/${encodeURIComponent(id)}/details`);
@@ -93,6 +98,25 @@ export const patchSkillAutonomy = (name: string, level: 'auto' | 'review' | 'man
   j<{ updated: boolean; name: string; autonomy_level: string }>(
     `/api/skills/${encodeURIComponent(name)}/autonomy`,
     { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autonomy_level: level }) },
+  );
+
+// v0.6.0 — launcher. PATCH replaces (not merges) the preset; pass `null`
+// to clear. POST launches a one-click task that runs as api_pool spend.
+export const patchSkillPreset = (name: string, preset: SkillPreset | null) =>
+  j<SkillRow>(`/api/skills/${encodeURIComponent(name)}/preset`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(preset),
+  });
+
+export const launchSkill = (name: string, opts: { description_override?: string } = {}) =>
+  j<{ task_id: number; status: string; skill: string }>(
+    `/api/skills/${encodeURIComponent(name)}/launch`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts),
+    },
   );
 
 // -- Context --

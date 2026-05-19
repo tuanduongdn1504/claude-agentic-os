@@ -8,18 +8,24 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Input } from '@/components/ui/Field';
 import { RangePicker } from './TokenUsageCard';
 import { LiveSessionDetail } from './LiveSessionDetail';
+import { CostSourceFilter, CostSourcePill } from './CostSourceUI';
 import * as api from '@/lib/api';
 import type { Range } from '@/lib/api';
+import type { CostSource } from '@/lib/types';
 import { cwdShort, fmtCount, fmtMs, fmtUsd } from '@/lib/format';
 
 export function SessionsTable() {
   const [range, setRange] = useState<Range>('30d');
   const [q, setQ] = useState('');
   const [active, setActive] = useState<string | null>(null);
+  const [costFilter, setCostFilter] = useState<CostSource | 'all'>('all');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['sessions-table', range, q],
-    queryFn: () => api.listSessions({ range, limit: 100, q: q || undefined }),
+    queryKey: ['sessions-table', range, q, costFilter],
+    queryFn: () => api.listSessions({
+      range, limit: 100, q: q || undefined,
+      cost_source: costFilter === 'all' ? undefined : costFilter,
+    }),
     refetchInterval: 30_000,
   });
   const items = data?.items ?? [];
@@ -32,7 +38,7 @@ export function SessionsTable() {
           <CardTitle>All sessions · {data?.total ?? '—'} total</CardTitle>
           <CardDescription>Derived from ~/.claude/projects JSONL. Click a row to open timeline.</CardDescription>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle pointer-events-none" />
             <Input
@@ -42,6 +48,7 @@ export function SessionsTable() {
               className="!pl-7 !h-8 !w-[220px] !text-[12px]"
             />
           </div>
+          <CostSourceFilter value={costFilter} onChange={setCostFilter} />
           <RangePicker value={range} onChange={setRange} />
         </div>
       </CardHeader>
@@ -59,6 +66,7 @@ export function SessionsTable() {
                 <tr className="text-left">
                   <th className="py-2 pr-3 font-normal">title</th>
                   <th className="py-2 pr-3 font-normal">model</th>
+                  <th className="py-2 pr-3 font-normal">source</th>
                   <th className="py-2 pr-3 font-normal">cwd</th>
                   <th className="py-2 pr-3 font-normal text-right">tokens</th>
                   <th className="py-2 pr-3 font-normal text-right">cost</th>
@@ -77,6 +85,7 @@ export function SessionsTable() {
                       {s.title ?? <span className="text-text-subtle font-mono">session {s.session_id.slice(0, 8)}</span>}
                     </td>
                     <td className="py-2 pr-3 font-mono text-text-dim">{s.model ?? '—'}</td>
+                    <td className="py-2 pr-3"><CostSourcePill source={s.cost_source} /></td>
                     <td className="py-2 pr-3 font-mono text-text-dim truncate max-w-[220px]" title={s.cwd ?? ''}>
                       {cwdShort(s.cwd)}
                     </td>

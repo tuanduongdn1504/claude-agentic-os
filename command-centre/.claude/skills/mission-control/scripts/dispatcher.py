@@ -473,15 +473,20 @@ def _running_count() -> int:
 
 
 def _today_cost_usd() -> float:
-    """Sum of cost_usd for tasks started today (local time)."""
+    """Sum of cost_usd for api_pool tasks completed today (local time).
+
+    v0.6.0 — cap is api_pool-only. Max-sub spend is notional for Pro/Max
+    operators on subsidised interactive sessions; capping on it would
+    surprise users. The cap exists to protect real-dollar API spend.
+    """
     with db.connect() as conn:
         row = conn.execute(
             """
             SELECT COALESCE(SUM(cost_usd), 0) AS s
             FROM ops_tasks
-            WHERE cost_usd IS NOT NULL
-              AND started_at IS NOT NULL
-              AND DATE(started_at, 'localtime') = DATE('now', 'localtime')
+            WHERE cost_source = 'api_pool'
+              AND cost_usd IS NOT NULL
+              AND DATE(completed_at, 'localtime') = DATE('now', 'localtime')
             """
         ).fetchone()
         return float(row["s"]) if row else 0.0
@@ -543,6 +548,21 @@ def run_once(verbose: bool = False) -> dict[str, int]:
 
     claimed = task_tracker.claim_pending(max_rows=slots)
     stats["claimed"] = len(claimed)
+
+    # v0.6.0 — belt-and-braces. The column default covers rows created
+    # after the migration; this line catches any pre-migration tasks that
+    # were sitting in 'pending' during the upgrade.
+    if claimed:
+        ids = [t["id"] for t in claimed]
+        placeholders = ",".join("?" * len(ids))
+        with db.connect() as conn:
+            conn.execute(
+                f"UPDATE ops_tasks SET cost_source='api_pool' "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            )
+        for t in claimed:
+            t["cost_source"] = "api_pool"
 
     for task in claimed:
         # Guard 3: hard risk gate. risk=high MUST require approval — even

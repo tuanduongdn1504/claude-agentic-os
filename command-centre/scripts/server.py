@@ -219,11 +219,26 @@ async def summary() -> dict[str, Any]:
             WHERE DATE(ts, 'localtime') = DATE('now', 'localtime')
             """
         ).fetchone()
+        # v0.6.0 — split today's cost by source.
+        cbs_rows = conn.execute(
+            """
+            SELECT COALESCE(cost_source, 'unknown') AS src,
+                   COALESCE(SUM(cost_usd), 0) AS cost
+            FROM sessions
+            WHERE DATE(started_at, 'localtime') = DATE('now', 'localtime')
+              AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY COALESCE(cost_source, 'unknown')
+            """
+        ).fetchall()
+    cost_by_source = {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0}
+    for r in cbs_rows:
+        cost_by_source[r["src"]] = round(float(r["cost"] or 0.0), 6)
     return {
         "sessions_today": row["sessions_today"],
         "effective_tokens_today": row["effective_tokens_today"],
         "errors_today": row["errors_today"],
         "cost_usd_today": row["cost_usd_today"],
+        "cost_by_source": cost_by_source,
         "tools_today": tools["tools_today"],
     }
 

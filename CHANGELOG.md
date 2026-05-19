@@ -1,5 +1,445 @@
 # Changelog
 
+## v0.6.1 — DRAFT spec: Telegram `/status` snapshot
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.1-amendment.md`,
+applied on top of current `main` HEAD (post v0.5.0-mvp2).
+
+Phase 2 feature from the Telegram Remote Trigger PRD
+(`command-centre/docs/prd-telegram-remote.md`). Bridge-only — single
+file change to `telegram_bridge.py` plus this CHANGELOG entry. No
+schema changes, no new endpoints, no breaking changes.
+
+Numbered `v0.6.1` (patch-level over v0.6.0) — small additive feature
+confined to the Telegram bridge subsystem. Alternative `v0.7.0` would
+be more semver-correct for a new feature but increments the minor
+faster than the rhythm of this codebase warrants.
+
+### Why this release
+
+mvp1 + mvp2 shipped the read/write Telegram loop. The remaining gap is
+**passive awareness**: between active operations, the operator's most
+common question is "What's my agent doing right now?" — and today the
+answer requires opening the dashboard. `/status` collapses the
+KpiRow + DispatcherStrip + AttentionBar + live sessions view into a
+single Telegram reply.
+
+This is the first feature in the corpus designed for glanceable
+telemetry, not active control. Expected use pattern is multiple times
+per day — morning check, lunch break, post-meeting, before bed.
+
+### What's planned
+
+- **`/status` slash command** in `telegram_bridge.py`. New regex
+  `_CMD_STATUS_RE` (no args, whole-message match). New routing branch
+  in `_handle_message`.
+- **`_handle_status(chat_id)`** — fetches 5 read-only GET endpoints
+  (`/api/system/dispatcher`, `/api/decisions`, `/api/sessions/live`,
+  `/api/tasks`, `/api/system/state`), per-call try/except, formats via
+  `_format_status`. Total round-trip <1s for a single operator's local
+  install.
+- **`_format_status(...)`** — multi-line Markdown V1 message.
+  Mobile-readable (390 px width, no horizontal scroll). Steady state
+  ~4-6 lines. Conditional alerts (emergency stop, cost cap,
+  back-pressure) appended only when active to keep the message tight.
+- **No audit-log row** — deliberately. `/status` is read-only, not a
+  state-changing operator action. Departs from mvp2's
+  audit-everything-from-Telegram pattern for state-changers.
+- **Partial-failure resilience** — failed endpoints show `?` for their
+  metric, footer line `_some metrics unavailable — see logs_`. Total
+  server failure shows a clear "dashboard down?" message with
+  `cc status` / `cc restart` hints.
+
+### Schema delta
+
+None. Read-only feature, all data sourced from existing endpoints.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: 1-2h. Lower than mvp2 (3-4h) because scope is intentionally
+narrow — single file, no schema, no new endpoints.
+
+---
+
+## v0.6.0 — SkillLauncher + cost-source disambiguation
+
+Built against the amendment in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.0-amendment.md`,
+applied on top of the v0.5.0-mvp1 working tree. Additive — no breaking
+changes to existing endpoints, no row drops, idempotent migration.
+Re-running `install.sh` against an existing v0.5.x install upgrades the
+schema in place and preserves every row.
+
+### What ships
+
+- **`SkillLauncher` panel** on the Command page (between Token usage and
+  Observability, inside `CollapsibleSection id="launcher"`). Renders
+  `user_invocable=1` skills as a 3-col grid, sorted by `launch_count`
+  desc → `last_launched_at` desc → name. Each card shows the skill name,
+  preset title, 30-day avg cost, last-launched age, a primary **Launch**
+  button (optimistic spinner → `↗ Task #N` chip for 2.5s), and a pencil
+  that expands an inline preset editor in-place — not a Sheet, not a
+  Modal. Esc cancels. Empty state teaches the operator how to mark a
+  skill `user_invocable: true` and run `cc sync`.
+- **New endpoints** —
+  `POST /api/skills/{name}/launch` (one-click run; defaults via the
+  preset → frontmatter → hardcoded-default fallback chain; cost_source
+  hard-coded to `'api_pool'`; pokes the dispatcher inline so the task
+  starts within ~1s instead of waiting for the next 120s heartbeat) and
+  `PATCH /api/skills/{name}/preset` (replace, not merge — `null` clears).
+  `GET /api/skills` rows now include `preset`, `last_launched_at`,
+  `launch_count`, `avg_cost_usd_30d`.
+- **`cost_source` enum** (`api_pool` | `max_sub` | `unknown`,
+  `codex_api` slot reserved for a future backend swap and accepted by
+  the validator from day one) on `ops_tasks` + `sessions`. Dispatcher
+  and launcher write `api_pool` (belt-and-braces UPDATE in `run_once`
+  for pre-migration pending rows); `sync_sessions._derive_cost_source`
+  pins `max_sub` for interactive REPL/IDE sessions via a left-join
+  against `ops_tasks`. Race covered by a two-line back-fill in
+  `task_tracker.update_task` whenever the dispatcher stashes a
+  `session_id`.
+- **Cost-split endpoints, backwards-compatible.** Every cost-bearing
+  endpoint keeps its existing top-level `cost_usd` total and adds a
+  `cost_by_source` sibling `{api_pool, max_sub, unknown}`:
+  - `GET /api/summary` — today rollup
+  - `GET /api/usage/tokens` — per daily row + window total
+  - `GET /api/system/dispatcher` — adds
+    `today_cost_api_pool_usd`, `today_cost_max_sub_usd`,
+    `today_cost_unknown_usd`
+  - `GET /api/sessions` — each row gains `cost_source`; new
+    `?cost_source=` filter param
+  - `GET /api/tasks` — each row gains `cost_source`
+- **`MISSION_CONTROL_DAILY_COST_CAP_USD` reads api_pool only.** Both
+  the dispatcher's `_today_cost_usd()` and the `AttentionBar`
+  `cost_capped` issue derive cap state from
+  `cost_source='api_pool' AND DATE(completed_at,'localtime')=today`.
+  Max-sub spend (Pro/Max-subsidised interactive sessions) is no longer
+  rolled into the cap math — capping on it would surprise users who
+  don't pay per-token interactively. Issue copy: "API-pool spend reached
+  cap ($X.XX of $Y.YY today). Max-sub usage continues."
+- **UI splits** —
+  - **KpiRow** cost tile gains a second line `api $X.XX · max $Y.YY`
+    in JetBrains Mono, dim; an amber `? $Z.ZZ` appended when unknown
+    spend exists today. Line 2 is omitted entirely when the day total
+    is zero (no visual noise on an empty tile).
+  - **DispatcherStrip** cost segment reads `today api $X.XX / cap $Y.YY`
+    (was `today $cost / cap`). Tone tracking unchanged.
+  - **TokenUsageCard** gains a thin per-day cost band beneath the
+    token stacks: two stacked mini-bars per day (cyan = api_pool,
+    grey = max_sub), ~6px tall, hover tooltip showing the per-day
+    triplet. Band hides when both subtotals are zero for the full window.
+  - **Sessions list** (`SessionsPage` at `/sessions` + the legacy
+    `SessionsTable` on `/activity`) gains a **Source** column between
+    Model and Tokens with `api` (cyan) / `max` (grey) / `?` (amber)
+    pills, plus an `all/api/max/?` filter toolbar.
+  - **TaskBoard** cards gain a small source pill next to the risk
+    pill. Hidden when the task is `pending`/`awaiting_approval` AND
+    `cost_usd IS NULL` (don't clutter cards with placeholder pills).
+- **`cc doctor`** gains `cost_source backfill` check: PASS when zero
+  ended sessions still read `'unknown'`; WARN (non-fatal) when pre-v0.6
+  rows exist — they surface as amber `?` tags in the UI and stay
+  unguessed. Manual recourse documented in HANDOVER.md.
+
+### Schema delta
+
+Five columns total across three tables, all through the existing
+`_migrate_add_column` helper. Re-runnable; existing rows on all three
+tables get `'unknown'` / `NULL` / `0` on first boot.
+
+| Table | Column | Type | Default |
+|---|---|---|---|
+| `skills` | `preset_json` | TEXT | NULL |
+| `skills` | `last_launched_at` | TEXT | NULL |
+| `skills` | `launch_count` | INTEGER NOT NULL | `0` |
+| `ops_tasks` | `cost_source` | TEXT NOT NULL | `'unknown'` |
+| `sessions` | `cost_source` | TEXT NOT NULL | `'unknown'` |
+
+### Verified
+
+- Migration: fresh DB → `init_db()` + two consecutive `apply_migrations()`
+  calls clean, all 5 columns present, defaults applied.
+- `tsc --noEmit` clean. `vite build` 524KB / 156KB gzipped.
+- `cc doctor`: PASS path renders `cost-source backfill complete — 0 rows
+  pending`; WARN path renders the pre-v0.6 row count with the manual-
+  recourse pointer.
+- Playwright (`tests/e2e/v0.6.spec.ts`, 7 specs against
+  `page.route` fixtures): KpiRow two-source readout renders + hides on
+  zero-total; SkillLauncher sorts by launch_count and filters out
+  non-invocable skills; one-click launch POSTs to
+  `/api/skills/{name}/launch` and surfaces the `↗ Task #N` chip;
+  preset edit round-trips across a page reload; sessions-list filter
+  narrows the request `cost_source` param and re-renders.
+
+### Operator flow
+
+```bash
+# Existing v0.5.x install — just restart, migration runs in lifespan.
+cc restart
+cc doctor                  # cost-source backfill should be ok or warn
+
+# Mark a skill invocable.
+# Add `user_invocable: true` to its frontmatter, then:
+cc sync
+
+# Open the dashboard → "Skill launcher" section now shows the skill.
+# Click Launch — task transitions pending → running → done without
+# ever opening TaskComposer.
+```
+
+### Tunables (env vars or .env)
+
+No new env vars. The cap variable + default-model variable are unchanged
+from v0.2.0:
+
+| Var | Default | What changed in v0.6.0 |
+|---|---|---|
+| `MISSION_CONTROL_DAILY_COST_CAP_USD` | unset = off | Now reads `api_pool` cost only |
+| `MISSION_CONTROL_DEFAULT_MODEL` | unset | Used as launcher's final fallback when preset has no model |
+
+### Not in this release (deferred)
+
+- **Codex backend.** `cost_source='codex_api'` is reserved in the
+  validator; backend pluggability is a future change with its own brief.
+- **Per-skill cost budgets.** Different concept from the daily cap.
+- **Obsidian embed mode** (`/embed` route).
+- **Automatic backfill heuristics** for pre-v0.6 `unknown` rows.
+
+---
+
+## v0.5.0-mvp2 — Telegram bridge inbound `/run`, `/approve`, `/cancel`
+
+Built against the amendment in
+`observability/(C) build-your-own-dashboard-prompt-v0.5.0-mvp2-amendment.md`,
+applied on top of current `main` HEAD (post-v0.6.0 merge). MVP commit 2
+of 2 per the Telegram Remote Trigger PRD
+(`command-centre/docs/prd-telegram-remote.md`). Closes Journey 4 —
+operator's inbound counterpart to mvp1's outbound `task_complete` +
+`risk_gated` push.
+
+Additive. No breaking changes to existing endpoints, no row drops,
+idempotent migration. Re-running the installer against any v0.5.x
+or v0.6.x install upgrades the schema in place and preserves every row.
+
+### Why this release
+
+mvp1 closed the outbound feedback loop. mvp2 closes inbound: operator
+can launch tasks (`/run <prompt>`), approve risk-gated tasks
+(`/approve <id>`), and cancel pending tasks (`/cancel <id>`) entirely
+from Telegram. Without mvp2, Journey 4 (late-night risk-gate intercept)
+had no phone-side recovery — operator had to walk to the desk and open
+the dashboard.
+
+### What ships
+
+All changes in `command-centre/scripts/telegram_bridge.py`,
+`command-centre/scripts/routers/tasks.py`, and
+`command-centre/scripts/db.py`. Plus a smoke harness at
+`command-centre/scripts/dev/smoke_mvp2.py`.
+
+- **Inbound `/run <prompt>` parser** (FR1-FR4). `_CMD_RE` split into
+  `_CMD_WITH_ID_RE` (for `answer|reply|approve|cancel <int_id>`) and
+  `_CMD_RUN_RE` (free-text remainder, multi-line via DOTALL). Title is
+  first 80 chars of the prompt (line breaks collapsed); description
+  carries the full prompt up to 3000 chars. Over-cap → usage hint with
+  the actual length; empty → usage hint. POSTs to `/api/tasks` with
+  `created_at_source='telegram'`.
+- **Inbound `/approve <task_id>`** (FR16) and **`/cancel <task_id>`**
+  (FR18). Thin wrappers around the API endpoints — no business logic
+  in the bridge. Each passes `?source=telegram` so the activities row
+  the backend writes is tagged for FR19 audit. 404 / 4xx error bodies
+  are surfaced to the operator verbatim (truncated to 500 chars,
+  `_md_safe`-scrubbed).
+- **Reply-to-msg on 🛑 RISK-GATED notifications** routes to
+  `_handle_approve(task_id)` (FR17). Reply-to-cancel is NOT supported —
+  explicit `/cancel <id>` only, to avoid accidental cancels from
+  casual replies.
+- **New endpoint `POST /api/tasks/{task_id}/cancel`** mirroring the
+  existing `/approve` pattern in `routers/tasks.py`. Accepts a prior
+  status of `pending` or `awaiting_approval`; returns 400 with an
+  explicit message for `running` (points to `/api/system/emergency-stop`)
+  or any terminal state. Writes `activities` row
+  `event_type='task_cancelled'` with `detail={task_id, prior_status,
+  source}` for forensic reconstruction.
+- **`POST /api/tasks/{task_id}/approve`** extended with `?source=`
+  query parameter and the matching `activities` row
+  (`event_type='task_risk_approved'`) — closes the FR19 audit gap.
+  Default `source='api'` keeps existing dashboard callers working
+  unchanged (FR24); bridge sends `'telegram'`.
+- **`POST /api/tasks`** body validator accepts an optional
+  `created_at_source` field (must be a non-empty string when present;
+  defaults to `'dashboard'`). Coexists with v0.6.0's hardcoded
+  `cost_source='api_pool'` — different columns, different concerns.
+- **`/help` text** extended with the three new verbs and a note that
+  replying to a 🛑 RISK-GATED message approves the task.
+
+### Schema delta
+
+One column, orthogonal with v0.6.0's `cost_source` migration:
+
+| Table | Column | Type | Default |
+|---|---|---|---|
+| `ops_tasks` | `created_at_source` | TEXT NOT NULL | `'dashboard'` |
+
+Through the existing `_migrate_add_column` helper. Existing rows
+backfill to `'dashboard'`. Re-runnable.
+
+### Pre-impl spike findings
+
+- `_CMD_RE` at `telegram_bridge.py:360` matched `(answer|reply)` only;
+  not extensible to `/run` (free-text, no leading int) without a split.
+  Two patterns now coexist.
+- `/api/tasks/{id}/approve` already existed (`tasks.py:135`) and used
+  HTTP 409 for status conflicts; mvp2 keeps that to avoid breaking
+  dashboard callers and adds the audit-row INSERT it was missing.
+  `/cancel` is new and uses 400 per amendment. The bridge handles both
+  uniformly — operator sees the error body either way.
+- `_lookup_by_tg_message` already accepted any `event_type` string —
+  `notification_log` rows tagged `risk_gated` by mvp1's outbound tick
+  resolved without DB changes. Only the routing branch in
+  `_handle_message` is new.
+- `ops_tasks.status` enum already included `'cancelled'` from v0.1.0.
+  No enum extension.
+
+### Verified
+
+`command-centre/scripts/dev/smoke_mvp2.py` walks all 6 stop conditions
+end-to-end against a stdlib mock Bot API on port 8767 and a real
+FastAPI server (with the freshly-migrated DB) on port 8866.
+
+- **S1 — `/run` happy path.** Row exists with `created_at_source=
+  'telegram'`, title is first-80-chars, description carries full
+  prompt, bot replied with `✅ task #1 queued · dispatcher pending`.
+- **S2 — `/cancel` happy path.** Status flips to `'cancelled'`,
+  `activities` row `task_cancelled` with `detail.source='telegram'`
+  and `detail.prior_status='pending'`.
+- **S3 — `/approve` via reply-to-msg on `risk_gated`.** Task transitions
+  `awaiting_approval → pending`; `activities` row `task_risk_approved`
+  with `detail.source='telegram'`.
+- **S4 — backward compat.** `/answer` flips `ops_decisions.status`,
+  `/reply` inserts `direction='user_to_agent'`, `/help` returns the
+  usage card (FR23).
+- **S5 — NFR11 malformed `/run`.** Empty, whitespace-only, and 3100-char
+  prompts each return a usage hint; the inbound loop does not crash.
+- **S6 — NFR11 non-integer id.** `/cancel abc` and `/approve xyz` each
+  return a usage hint; no API call.
+
+Plus the NFR5 grep audit: bot token absent from every DB row and from
+the server's full stdout/stderr capture.
+
+24/24 checks pass.
+
+### Operator flow
+
+```bash
+cc restart                            # lifespan runs the new migration
+# In Telegram (operator chat):
+/run draft release notes for v2.4     # → ✅ task #N queued
+/approve 62                           # → ✅ task #62 approved
+/cancel 63                            # → ✅ task #63 cancelled
+# Or, reply to a 🛑 RISK-GATED notification with any text → approves.
+```
+
+### Not in this release (deferred to mvp2-growth / Phase 2)
+
+- **`/status` snapshot** (live sessions, pending decisions, today cost,
+  free slots).
+- **Inline keyboard `[Yes] [No]`** for DECISIONS.
+- **`/snooze <decision_id> <duration>`** wires up
+  `notification_log.snoozed_until`.
+- **`/schedule "<cron>" <prompt>`** creates `ops_schedules` rows from TG.
+- **Reply-to-task-complete starts follow-up `/run`** — Growth feature.
+- Topic-per-task in TG supergroup, inline-button risk approval,
+  voice-memo → STT, multi-operator allowlist, mobile dashboard surface
+  — Phase 3 vision; no commitment.
+
+---
+
+## v0.5.0-mvp1 — Telegram bridge: outbound task_complete + risk_gated push
+
+MVP commit 1 of 2 per the Resource Risk mitigation in the Telegram Remote
+Trigger PRD (`command-centre/docs/prd-telegram-remote.md`, commit
+`3fd6e35`). Closes the feedback loop for FR11 (task-complete push) and
+FR12 (risk-gated push). Backfilled into CHANGELOG retroactively at v0.6.0
+spec time — original commit was `1936cdf`.
+
+### What ships
+
+All changes in `command-centre/scripts/telegram_bridge.py` (+107 / -3).
+
+- `_outbound_tick()` now polls `/api/tasks?status=done|failed` and
+  `/api/tasks?status=awaiting_approval`, pushing each new transition once
+  via `notification_log` dedupe (`event_type='task_complete'` or
+  `'risk_gated'`).
+- `_format_task_complete()` renders done/failed task summaries with title,
+  duration, cost, session, plus `error_message` (failed) or
+  `output_summary` (done).
+- `_format_risk_gated()` renders gated-task notifications with title,
+  `risk_level`, and inline `/approve <id>` + `/cancel <id>` recovery
+  hints.
+- `_md_safe()` sanitises Markdown V1 control chars (`_ * \` [ ]`) in
+  user-content fields to prevent Telegram parser 400s.
+- `_outbound_loop()` log line extended: `notified d= i= tc= rg= err=`.
+
+### Pre-impl spike findings
+
+- `/api/tasks/{id}/approve` already exists (`tasks.py:132`). No work
+  needed for FR16.
+- State name confirmed: `'awaiting_approval'` (PRD assumption correct).
+- `/api/tasks/{id}/cancel` does NOT exist yet — deferred to mvp2 (~30
+  min estimate).
+
+### Verified
+
+Synthetic `done` task → 30s tick → TG message id=13 delivered,
+`notification_log` row written, dedupe verified on re-tick.
+
+### Not in this release (deferred to mvp2)
+
+- Inbound `/run`, `/approve`, `/cancel` parsers (Journey 4 closure).
+
+---
+
+## v0.4.0 — operator UI: Sessions Explorer, Decisions Queue, Telegram bridge status
+
+Three new operator surfaces on the dashboard. UI-heavy release with a
+single new health endpoint — no schema changes, no dispatcher behaviour
+changes. Backfilled into CHANGELOG retroactively at v0.6.0 spec time —
+original commit was `5d0a72b`.
+
+### What ships
+
+- **`/sessions`** — Sessions Explorer. Two-panel layout (projects →
+  timeline); client-side grouping over `/api/sessions` (limit=500), no new
+  backend route.
+- **`/decisions`** — HITL hub combining the existing `DecisionsCard` and
+  `InboxCard` plus answered history. Pending count badge in nav (polls
+  every 5s).
+- **`/api/system/telegram`** — Telegram bridge health endpoint: pgrep
+  liveness probe, `notification_log` stats over 24h, stderr-tail of the
+  last error. Surfaced as a status row at the top of `/decisions`.
+
+### Frontend
+
+- New pages: `SessionsPage.tsx` (+226 lines), `DecisionsPage.tsx` (+131).
+- New panel: `TelegramBridgeStatus.tsx` (+92).
+- Nav, router, types, hooks, and api wrappers extended (~57 lines
+  combined).
+
+### Backend
+
+- `command-centre/scripts/routers/system.py` (+93 lines) — adds the
+  `/api/system/telegram` endpoint.
+
+Total diff: 9 files, +595 insertions, -4 deletions.
+
+---
+
 ## v0.3.2 — fix: `cc` via `~/.local/bin` symlink
 
 Bug fix. When `install.sh` symlinks `~/.local/bin/cc` →
