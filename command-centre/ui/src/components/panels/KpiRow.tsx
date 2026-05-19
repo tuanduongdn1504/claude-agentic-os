@@ -5,6 +5,7 @@ import { Card } from '@/components/ui/Card';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Sparkline } from '@/components/ui/Sparkline';
 import { fmtCount, fmtUsd } from '@/lib/format';
+import type { CostBySource } from '@/lib/types';
 
 type Tone = 'blue' | 'purple' | 'green' | 'amber';
 
@@ -83,12 +84,54 @@ export function KpiRow() {
       <Tile loading={isLoading} kicker="Cost · today" icon={<DollarSign size={16} />} tone="green"
         value={fmtUsd(data?.cost_usd_today)}
         spark={spark?.cost_usd}
-        sub="derived from model prices · last 24h →" />
-      <Tile loading={isLoading} kicker="Errors · today" icon={<AlertTriangle size={16} />}
-        tone={data && data.errors_today > 0 ? 'amber' : 'green'}
-        value={fmtCount(data?.errors_today)}
-        spark={spark?.errors}
-        sub={data && data.errors_today > 0 ? 'check Attention bar' : 'all clear · last 24h →'} />
+        sub={<CostSubLine total={data?.cost_usd_today} byTok={data?.cost_by_source} />} />
+      <ErrorTile data={data} isLoading={isLoading} spark={spark?.errors} />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// v0.6.0 — cost-source split line under today's cost tile. Skips entirely
+// when the day total is zero (no visual noise on an empty-state tile).
+
+function CostSubLine({ total, byTok }: { total: number | undefined; byTok: CostBySource | undefined }) {
+  if (!total || total <= 0) return null;
+  const api = byTok?.api_pool ?? 0;
+  const max = byTok?.max_sub ?? 0;
+  const unk = byTok?.unknown ?? 0;
+  return (
+    <span data-testid="cost-by-source" data-api={api} data-max={max} data-unknown={unk}>
+      <span className="text-text-dim">api </span>
+      <span className="text-text num">{fmtUsd(api)}</span>
+      <span className="text-text-subtle mx-1.5">·</span>
+      <span className="text-text-dim">max </span>
+      <span className="text-text num">{fmtUsd(max)}</span>
+      {unk > 0 && (
+        <>
+          <span className="text-text-subtle mx-1.5">·</span>
+          <span className="text-status-amber">? <span className="num">{fmtUsd(unk)}</span></span>
+        </>
+      )}
+    </span>
+  );
+}
+
+function ErrorTile({
+  data, isLoading, spark,
+}: {
+  data: ReturnType<typeof useSummary>['data'];
+  isLoading: boolean;
+  spark: number[] | undefined;
+}) {
+  return (
+    <Tile
+      loading={isLoading}
+      kicker="Errors · today"
+      icon={<AlertTriangle size={16} />}
+      tone={data && data.errors_today > 0 ? 'amber' : 'green'}
+      value={fmtCount(data?.errors_today)}
+      spark={spark}
+      sub={data && data.errors_today > 0 ? 'check Attention bar' : 'all clear · last 24h →'}
+    />
   );
 }
