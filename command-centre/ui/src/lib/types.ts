@@ -1,11 +1,20 @@
 // Types — mirror the FastAPI response shapes hit by /api/*.
 
+export interface AccountSummaryRow {
+  label: string;
+  sessions: number;
+  tokens: number;
+  cost_usd: number;
+}
+
 export interface Summary {
   sessions_today: number;
   effective_tokens_today: number;
   errors_today: number;
   cost_usd_today: number;
   tools_today: number;
+  cost_by_source?: { api_pool: number; max_sub: number; unknown: number };
+  by_account?: Record<string, AccountSummaryRow>;
 }
 
 export interface SystemHealth {

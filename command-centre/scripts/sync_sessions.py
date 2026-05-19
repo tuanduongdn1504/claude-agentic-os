@@ -194,7 +194,7 @@ def _ingest_event(agg: SessionAgg, ev: dict[str, Any]) -> None:
                     agg.service_tier = str(tier)
                 date_local = _local_date(ts or "")
                 if date_local:
-                    key = (date_local, model)
+                    key = (date_local, model, agg.source or "ide")
                     bucket = agg.daily_usage.setdefault(key, [0, 0, 0, 0])
                     bucket[0] += pin
                     bucket[1] += pout
@@ -455,17 +455,26 @@ def _merge_daily(conn: sqlite3.Connection, daily: dict[tuple[str, str, str], lis
     )
 
 
-def _compute_daily_from_sessions(conn: sqlite3.Connection) -> dict[tuple[str, str, str], list[int]]:
-    """Re-derive token_usage from sessions. Simple and idempotent.
-    Limitation: a session that spans midnight is all attributed to its
-    start-day. Error < 5% of daily totals on typical < 4hr sessions."""
+def _compute_daily_from_sessions(
+    conn: sqlite3.Connection,
+    exclude_ids: set[str] | None = None,
+) -> dict[tuple[str, str, str], list[int]]:
+    """Re-derive token_usage from sessions, optionally skipping specific sessions.
+
+    Sessions whose IDs are in `exclude_ids` are omitted because the caller will
+    supply more accurate per-event daily data for them instead.  For all other
+    sessions (typically closed, single-day) attributing all tokens to started_at
+    is a < 5% error on typical < 4hr sessions.
+    """
     daily: dict[tuple[str, str, str], list[int]] = {}
     rows = conn.execute(
-        "SELECT started_at, model, source, input_tokens, output_tokens, "
+        "SELECT session_id, started_at, model, source, input_tokens, output_tokens, "
         "cache_read_tokens, cache_create_tokens FROM sessions "
         "WHERE model IS NOT NULL AND model NOT LIKE '<%'"
     ).fetchall()
     for r in rows:
+        if exclude_ids and r["session_id"] in exclude_ids:
+            continue
         date_local = _local_date(r["started_at"] or "")
         if not date_local:
             continue
@@ -505,6 +514,11 @@ def run_sync(full: bool = False, verbose: bool = False) -> dict[str, int]:
 
     now_ts = time.time()
 
+    # Per-event daily data collected from re-parsed files (more accurate than
+    # session start-date attribution for sessions that span midnight).
+    parsed_session_ids: set[str] = set()
+    parsed_daily: dict[tuple[str, str, str], list[int]] = {}
+
     with db.connect() as conn:
         conn.execute("BEGIN")
         try:
@@ -528,8 +542,21 @@ def run_sync(full: bool = False, verbose: bool = False) -> dict[str, int]:
                         ended_at = agg.last_ts
                     _upsert_session(conn, agg, ended_at)
                     stats["sessions_upserted"] += 1
+                    # Accumulate per-event daily data; keys are (date, model, source).
+                    parsed_session_ids.add(agg.session_id)
+                    for key, vals in agg.daily_usage.items():
+                        bucket = parsed_daily.setdefault(key, [0, 0, 0, 0])
+                        for i in range(4):
+                            bucket[i] += vals[i]
 
-            daily = _compute_daily_from_sessions(conn)
+            # Session-level attribution for untouched (closed) sessions.
+            daily = _compute_daily_from_sessions(conn, exclude_ids=parsed_session_ids)
+            # Merge in per-event data for re-parsed sessions; this correctly
+            # splits tokens across calendar days for sessions that span midnight.
+            for key, vals in parsed_daily.items():
+                bucket = daily.setdefault(key, [0, 0, 0, 0])
+                for i in range(4):
+                    bucket[i] += vals[i]
             _merge_daily(conn, daily)
 
             conn.execute(
