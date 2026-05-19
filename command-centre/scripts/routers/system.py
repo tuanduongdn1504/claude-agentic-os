@@ -223,15 +223,21 @@ async def system_dispatcher() -> dict[str, Any]:
         running = int(conn.execute(
             "SELECT COUNT(*) AS n FROM ops_tasks WHERE status='running'"
         ).fetchone()["n"])
-        today_cost = float(conn.execute(
+        # v0.6.0 — cost split by source. Cap reads api_pool only. Bucket
+        # by completed_at to match dispatcher._today_cost_usd; that's when
+        # the cost actually realises and prevents the strip from disagreeing
+        # with the dispatcher's cap math.
+        cost_rows = conn.execute(
             """
-            SELECT COALESCE(SUM(cost_usd), 0) AS s
+            SELECT COALESCE(cost_source, 'unknown') AS src,
+                   COALESCE(SUM(cost_usd), 0) AS cost
             FROM ops_tasks
             WHERE cost_usd IS NOT NULL
-              AND started_at IS NOT NULL
-              AND DATE(started_at, 'localtime') = DATE('now', 'localtime')
+              AND completed_at IS NOT NULL
+              AND DATE(completed_at, 'localtime') = DATE('now', 'localtime')
+            GROUP BY COALESCE(cost_source, 'unknown')
             """
-        ).fetchone()["s"])
+        ).fetchall()
         risk_gated_today = int(conn.execute(
             """
             SELECT COUNT(*) AS n FROM activities
@@ -240,8 +246,18 @@ async def system_dispatcher() -> dict[str, Any]:
             """
         ).fetchone()["n"])
 
+    by_src = {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0}
+    for r in cost_rows:
+        by_src[r["src"]] = round(float(r["cost"] or 0.0), 6)
+    today_cost_api = by_src["api_pool"]
+    today_cost_max = by_src["max_sub"]
+    today_cost_unknown = by_src["unknown"]
+    today_cost_total = round(today_cost_api + today_cost_max + today_cost_unknown, 6)
+
     back_pressure = running >= max_concurrent
-    cost_capped = daily_cap > 0 and today_cost >= daily_cap
+    # Cap is api_pool-only from v0.6.0. Max-sub spend is notional for Pro/Max
+    # operators — capping on it would surprise users.
+    cost_capped = daily_cap > 0 and today_cost_api >= daily_cap
 
     return {
         "max_concurrent": max_concurrent,
@@ -249,7 +265,10 @@ async def system_dispatcher() -> dict[str, Any]:
         "free_slots": max(0, max_concurrent - running),
         "back_pressure": back_pressure,
         "daily_cost_cap_usd": daily_cap if daily_cap > 0 else None,
-        "today_cost_usd": today_cost,
+        "today_cost_usd": today_cost_total,
+        "today_cost_api_pool_usd": today_cost_api,
+        "today_cost_max_sub_usd": today_cost_max,
+        "today_cost_unknown_usd": today_cost_unknown,
         "cost_capped": cost_capped,
         "hard_risk_gate": hard_risk_gate,
         "risk_gated_today": risk_gated_today,
@@ -422,25 +441,31 @@ async def attention() -> dict[str, Any]:
                 "running": running, "max_concurrent": max_concurrent,
             })
 
-        # Hardening: daily cost cap reached.
+        # Hardening: daily cost cap reached. v0.6.0 — api_pool only.
         try:
             cap = float(os.environ.get("MISSION_CONTROL_DAILY_COST_CAP_USD") or 0)
         except ValueError:
             cap = 0.0
         if cap > 0:
-            today_cost = float(conn.execute(
+            today_cost_api = float(conn.execute(
                 """
                 SELECT COALESCE(SUM(cost_usd), 0) AS s
                 FROM ops_tasks
-                WHERE cost_usd IS NOT NULL
-                  AND started_at IS NOT NULL
-                  AND DATE(started_at, 'localtime') = DATE('now', 'localtime')
+                WHERE cost_source = 'api_pool'
+                  AND cost_usd IS NOT NULL
+                  AND DATE(completed_at, 'localtime') = DATE('now', 'localtime')
                 """
             ).fetchone()["s"])
-            if today_cost >= cap:
+            if today_cost_api >= cap:
                 issues.append({
                     "kind": "cost_capped", "severity": "error",
-                    "today_cost_usd": today_cost, "cap_usd": cap,
+                    "today_cost_usd": today_cost_api,
+                    "today_cost_api_pool_usd": today_cost_api,
+                    "cap_usd": cap,
+                    "message": (
+                        f"API-pool spend reached cap (${today_cost_api:.2f} of "
+                        f"${cap:.2f} today). Max-sub usage continues."
+                    ),
                 })
 
     return {"issues": issues, "count": len(issues)}

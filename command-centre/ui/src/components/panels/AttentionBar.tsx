@@ -26,6 +26,8 @@ export function AttentionBar() {
 }
 
 function describe(it: Record<string, unknown>): string {
+  // Backend supplies a `message` field for some kinds — prefer it.
+  if (typeof it.message === 'string' && it.message) return it.message;
   switch (it.kind) {
     case 'stuck_session':
       return `${it.title ?? it.session_id ?? 'session'} started ${it.started_at ?? '?'}`;
@@ -37,6 +39,16 @@ function describe(it: Record<string, unknown>): string {
       return `dispatcher silent ${it.age_s}s`;
     case 'schedule_overdue':
       return `${it.name ?? 'schedule'} — next run ${it.next_run_at ?? '?'}`;
+    case 'cost_capped': {
+      const api = (it.today_cost_api_pool_usd ?? it.today_cost_usd) as number | undefined;
+      const cap = it.cap_usd as number | undefined;
+      if (api != null && cap != null) {
+        return `API-pool spend reached cap ($${api.toFixed(2)} of $${cap.toFixed(2)} today). Max-sub usage continues.`;
+      }
+      return 'API-pool spend reached daily cap.';
+    }
+    case 'back_pressure':
+      return `${it.running}/${it.max_concurrent} dispatcher slots in use`;
     default:
       return JSON.stringify(it);
   }
