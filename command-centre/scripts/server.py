@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,7 +31,54 @@ from routers import (  # noqa: E402
     context, firehose, hitl, mcp, observability, schedules, sessions, skills, system, tasks,
 )
 
-SYNC_INTERVAL_SECONDS = 120
+FALLBACK_POLL_SECONDS = 300  # 5-min safety net for missed FSEvents (sleep/wake)
+
+# ---------------------------------------------------------------------------
+# FSEvents watcher (watchdog)
+# ---------------------------------------------------------------------------
+
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    _WATCHDOG_AVAILABLE = True
+except ImportError:
+    _WATCHDOG_AVAILABLE = False
+    print("[server] watchdog not installed — falling back to polling", file=sys.stderr)
+
+
+if _WATCHDOG_AVAILABLE:
+    class _JsonlWatcher(FileSystemEventHandler):
+        """Debounced FSEvents handler: triggers an async sync within ~2 s of any
+        .jsonl write. Claude writes JSONL line-by-line so a single LLM response
+        fires many events — the 2-second debounce coalesces them into one sync."""
+
+        DEBOUNCE_S = 2.0
+
+        def __init__(self, trigger: asyncio.Event, loop: asyncio.AbstractEventLoop):
+            super().__init__()
+            self._trigger = trigger
+            self._loop = loop
+            self._timer: threading.Timer | None = None
+            self._lock = threading.Lock()
+
+        def _schedule(self) -> None:
+            with self._lock:
+                if self._timer:
+                    self._timer.cancel()
+                self._timer = threading.Timer(self.DEBOUNCE_S, self._fire)
+                self._timer.daemon = True
+                self._timer.start()
+
+        def _fire(self) -> None:
+            self._loop.call_soon_threadsafe(self._trigger.set)
+
+        def on_modified(self, event) -> None:
+            if not event.is_directory and event.src_path.endswith(".jsonl"):
+                self._schedule()
+
+        def on_created(self, event) -> None:
+            if not event.is_directory and event.src_path.endswith(".jsonl"):
+                self._schedule()
 
 
 # ---------------------------------------------------------------------------
@@ -61,10 +109,48 @@ async def lifespan(app: FastAPI):
 
 
 async def _sync_loop(app: FastAPI, stop: asyncio.Event) -> None:
-    await _run_sync(app)
+    await _run_sync(app)  # initial sync on startup
+    if _WATCHDOG_AVAILABLE:
+        await _sync_loop_fsevents(app, stop)
+    else:
+        await _sync_loop_poll(app, stop)
+
+
+async def _sync_loop_fsevents(app: FastAPI, stop: asyncio.Event) -> None:
+    """FSEvents-driven sync: fires within ~2 s of a .jsonl write.
+    Falls back to a 5-min poll as a safety net after sleep/wake."""
+    loop = asyncio.get_running_loop()
+    trigger = asyncio.Event()
+
+    watch_dir = Path.home() / ".claude" / "projects"
+    watch_dir.mkdir(parents=True, exist_ok=True)
+
+    handler = _JsonlWatcher(trigger, loop)
+    observer = Observer()
+    observer.schedule(handler, str(watch_dir), recursive=True)
+    observer.start()
+    print(f"[sync_loop] FSEvents watching {watch_dir}", file=sys.stderr)
+
+    try:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(trigger.wait(), timeout=FALLBACK_POLL_SECONDS)
+            except asyncio.TimeoutError:
+                print("[sync_loop] fallback poll fired (no events for 5 min)", file=sys.stderr)
+            if stop.is_set():
+                break
+            trigger.clear()  # clear before sync — changes during sync captured next round
+            await _run_sync(app)
+    finally:
+        observer.stop()
+        observer.join(timeout=5)
+
+
+async def _sync_loop_poll(app: FastAPI, stop: asyncio.Event) -> None:
+    """Legacy polling fallback (used only if watchdog unavailable)."""
     while not stop.is_set():
         try:
-            await asyncio.wait_for(stop.wait(), timeout=SYNC_INTERVAL_SECONDS)
+            await asyncio.wait_for(stop.wait(), timeout=FALLBACK_POLL_SECONDS)
         except asyncio.TimeoutError:
             pass
         if stop.is_set():

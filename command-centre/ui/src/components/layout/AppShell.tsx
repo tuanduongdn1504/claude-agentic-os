@@ -19,8 +19,11 @@ export function AppShell() {
             </span>
             <div className="flex flex-col leading-tight">
               <span className="font-semibold tracking-tight text-[13.5px]">Command Centre</span>
-              <span className="font-mono text-[10.5px] text-text-subtle flex items-center gap-1">
-                <Hash size={10} /> {health?.tz ?? '…'} · up {health ? fmtAgeSeconds(health.uptime_s) : '…'}
+              <span
+                className="font-mono text-[10.5px] text-text-subtle flex items-center gap-1"
+                title={health?.tz ? `server tz: ${health.tz}` : undefined}
+              >
+                <Hash size={10} /> GMT+7 · up {health ? fmtAgeSeconds(health.uptime_s) : '…'}
               </span>
             </div>
           </div>

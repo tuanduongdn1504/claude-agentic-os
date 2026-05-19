@@ -7,7 +7,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Textarea } from '@/components/ui/Field';
 import { useInbox, useMarkInboxRead, useReplyInbox } from '@/hooks/useQueries';
 import type { InboxRow } from '@/lib/types';
-import { fmtAgeSeconds } from '@/lib/format';
+import { fmtAgoFromIso } from '@/lib/format';
 import { Check, Reply } from 'lucide-react';
 
 export function InboxCard() {
@@ -79,7 +79,7 @@ function InboxItem({ msg }: { msg: InboxRow }) {
           )}
         </div>
         <span className="text-[11px] font-mono text-text-subtle whitespace-nowrap">
-          {fmtAge(msg.created_at)}
+          {fmtAgoFromIso(msg.created_at)}
         </span>
       </div>
 
@@ -130,8 +130,3 @@ function InboxItem({ msg }: { msg: InboxRow }) {
   );
 }
 
-function fmtAge(iso: string): string {
-  const then = Date.parse(iso);
-  if (isNaN(then)) return iso;
-  return fmtAgeSeconds((Date.now() - then) / 1000);
-}

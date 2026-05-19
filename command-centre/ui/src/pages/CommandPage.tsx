@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { SystemHealthStrip } from '@/components/panels/SystemHealthStrip';
 import { KpiRow } from '@/components/panels/KpiRow';
+import { AccountBreakdownCard } from '@/components/panels/AccountBreakdownCard';
 import { AttentionBar } from '@/components/panels/AttentionBar';
 import { CollapsibleSection } from '@/components/ui/CollapsibleSection';
 import { TokenUsageCard } from '@/components/panels/TokenUsageCard';
@@ -38,6 +39,7 @@ export default function CommandPage() {
       <SystemHealthStrip />
       <AttentionBar />
       <KpiRow />
+      <AccountBreakdownCard />
 
       <CollapsibleSection id="hitl-live" title="Live + HITL" subtitle="running sessions · decisions · inbox" defaultOpen>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 grid-match">

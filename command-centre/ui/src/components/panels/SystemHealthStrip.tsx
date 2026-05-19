@@ -39,8 +39,11 @@ export function SystemHealthStrip() {
           <StatePill tone={ageTone(h.notifier_last_tick_age_s, 90, 300)}>
             notifier {fmtAgeSeconds(h.notifier_last_tick_age_s)}
           </StatePill>
-          <span className="ml-auto font-mono text-[11.5px] text-text-subtle">
-            db {fmtBytes(h.db_size_bytes)} · tz {h.tz}
+          <span
+            className="ml-auto font-mono text-[11.5px] text-text-subtle"
+            title={`server tz: ${h.tz}`}
+          >
+            db {fmtBytes(h.db_size_bytes)} · clock GMT+7
           </span>
         </>
       )}

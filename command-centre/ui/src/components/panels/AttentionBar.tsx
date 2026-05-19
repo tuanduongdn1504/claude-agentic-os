@@ -1,5 +1,6 @@
 import { AlertCircle } from 'lucide-react';
 import { useAttention } from '@/hooks/useQueries';
+import { fmtDateTimeUTC7 } from '@/lib/format';
 
 export function AttentionBar() {
   const { data } = useAttention();
@@ -30,7 +31,7 @@ function describe(it: Record<string, unknown>): string {
   if (typeof it.message === 'string' && it.message) return it.message;
   switch (it.kind) {
     case 'stuck_session':
-      return `${it.title ?? it.session_id ?? 'session'} started ${it.started_at ?? '?'}`;
+      return `${it.title ?? it.session_id ?? 'session'} started ${it.started_at ? fmtDateTimeUTC7(String(it.started_at)) : '?'}`;
     case 'failed_task':
       return `${it.title ?? 'task'} — ${it.error_message ?? 'no message'}`;
     case 'decisions_pending':
@@ -38,7 +39,7 @@ function describe(it: Record<string, unknown>): string {
     case 'dispatcher_stale':
       return `dispatcher silent ${it.age_s}s`;
     case 'schedule_overdue':
-      return `${it.name ?? 'schedule'} — next run ${it.next_run_at ?? '?'}`;
+      return `${it.name ?? 'schedule'} — next run ${it.next_run_at ? fmtDateTimeUTC7(String(it.next_run_at)) : '?'}`;
     case 'cost_capped': {
       const api = (it.today_cost_api_pool_usd ?? it.today_cost_usd) as number | undefined;
       const cap = it.cap_usd as number | undefined;

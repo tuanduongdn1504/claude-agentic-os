@@ -1,5 +1,14 @@
 // Types — mirror the FastAPI response shapes hit by /api/*.
 
+// Multi-account split (WIP from claude/hopeful-borg-062f4e). Populated by the
+// backend's `by_account` rollup keyed by account_id.
+export interface AccountSummaryRow {
+  label: string;
+  sessions: number;
+  tokens: number;
+  cost_usd: number;
+}
+
 // v0.6.0 — cost-source enum. `codex_api` slot reserved for a future
 // backend swap; not produced anywhere in this release.
 export type CostSource = 'api_pool' | 'max_sub' | 'unknown' | 'codex_api';
@@ -17,6 +26,9 @@ export interface Summary {
   cost_usd_today: number;
   cost_by_source: CostBySource;
   tools_today: number;
+  // WIP — populated only when the backend ships the multi-account UI surface
+  // (currently only in the installed deploy, not on main).
+  by_account?: Record<string, AccountSummaryRow>;
 }
 
 export interface SystemHealth {
