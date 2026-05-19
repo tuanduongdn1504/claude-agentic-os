@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.6.3 — DRAFT spec: multi-account port + FSEvents opt-in + wip cleanup
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.3-amendment.md`,
+applied on top of current `main` HEAD (post v0.6.2).
+
+Clean-up release. Three wip commits (`c877468`, `9e51c76`, `b1f5650`)
+landed on main between the v0.6.1 spec and the v0.6.1 ship without
+CHANGELOG mention, leaving two surfaces in a half-shipped state:
+multi-account UI without a backend (`AccountBreakdownCard` renders an
+empty state), and FSEvents watcher as the default code path in
+`server.py` despite being reverted in the operator's installed copy.
+v0.6.3 ports the multi-account backend across, gates FSEvents behind
+`CC_USE_FSEVENTS=1`, and writes a single backfill CHANGELOG entry
+labelling all four wip-derived bits with their actual status.
+
+Numbered `v0.6.3` (patch over v0.6.2) — consistent with v0.6.1 /
+v0.6.2 patch-cadence. Alternative `v0.7.0` is defensible (multi-
+account end-to-end is a real feature ship); the installed copy's
+`db.py` actually labels the migration "v0.7.0 — multi-account
+tagging." Override at build time if minor-bump semantics preferred.
+
+### Why this release
+
+Main currently has a UI card that renders empty (multi-account
+backend never ported from the install) and an experimental file
+watcher running by default (reverted in the install but still active
+in the repo). Both are silent landmines for anyone rebuilding from a
+fresh checkout. This release closes both.
+
+### What's planned
+
+- **Multi-account backend port.** New `scripts/helpers/accounts.py`
+  + `scripts/hooks/session_start_account_snapshot.py` from the
+  install. New `sessions.account_id` column + index via
+  `_migrate_add_column`. `sync_sessions.py` stamping. `server.py`
+  `/api/summary by_account` block. `AccountBreakdownCard` (already
+  in main from `9e51c76`) starts rendering real data.
+- **FSEvents env-gate.** `CC_USE_FSEVENTS` env var (default off)
+  controls the experimental watchdog-based JSONL watcher. Default
+  reverts to the proven 120s polling loop — matches install behaviour.
+  `watchdog` stays in `requirements.txt` so the single-file install
+  path keeps working, but the env-gate ensures the experimental code
+  is not exercised unless explicitly opted in.
+- **Operator docs.** `data/accounts.json.example` template, README
+  subsection on multi-account setup (hook registration in
+  `~/.claude/settings.json`), `.env.example` line for
+  `CC_USE_FSEVENTS`.
+- **Retroactive labels for two already-clean wip bits.** GMT+7 finish
+  (`c877468`) and per-event daily token attribution fix (part of
+  `9e51c76`) shipped clean in main; the CHANGELOG entry calls them
+  out so the wip-cleanup pile has full attribution.
+
+### Schema delta
+
+One column, additive next to v0.6.0's `cost_source` and
+v0.5.0-mvp2's `created_at_source`:
+
+| Table | Column | Type | Default |
+|---|---|---|---|
+| `sessions` | `account_id` | TEXT | NULL |
+
+Plus `CREATE INDEX IF NOT EXISTS idx_sessions_account ON
+sessions(account_id)`. Both idempotent.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: ~1-2h. Port ~30 min, FSEvents gate ~15 min, smoke tests
+~30 min, CHANGELOG flip ~10 min.
+
+---
+
 ## v0.6.2 — Telegram `/snooze <decision_id> [duration]`
 
 Built against the amendment in
