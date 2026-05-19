@@ -30,7 +30,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -123,23 +123,51 @@ def _tg(method: str, payload: dict, timeout: float = 10.0) -> dict:
 # notification_log helpers — dedupe + reply lookup.
 # ---------------------------------------------------------------------------
 
+def _now_utc_iso() -> str:
+    """`YYYY-MM-DD HH:MM:SS` in UTC — matches SQLite's `datetime('now')` so
+    notification_log.snoozed_until comparisons stay lexicographic."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _already_notified(event_type: str, event_key: str) -> bool:
+    """True when a notification has already been sent for this event AND
+    its snooze (if any) is still in the future. v0.6.2 wires in the
+    `snoozed_until` column shipped dormant in v0.3.0 — when it's set and
+    still in the future the row is treated as "not yet notified" so the
+    outbound tick re-fires once after the window elapses."""
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT 1 FROM notification_log "
+            "SELECT snoozed_until FROM notification_log "
             "WHERE event_type=? AND event_key=? AND chat_id=? LIMIT 1",
             (event_type, event_key, CHAT_ID),
         ).fetchone()
-        return row is not None
+        if not row:
+            return False
+        snoozed_until = row[0]
+        if snoozed_until is None:
+            return True
+        # ISO8601 UTC strings — lexicographic comparison matches chronological.
+        return snoozed_until > _now_utc_iso()
 
 
 def _record_notify(event_type: str, event_key: str, telegram_message_id: str) -> None:
+    """Record an outbound notification. INSERT-OR-IGNORE on the unique
+    `(event_type, event_key, chat_id)` index so the existing row survives
+    a re-fire. v0.6.2: when the row already existed with an elapsed
+    `snoozed_until`, clear it back to NULL so dedupe reverts to the
+    default "already notified" — preventing the re-fire loop."""
     with db.connect() as conn:
         conn.execute(
             "INSERT OR IGNORE INTO notification_log "
             "(event_type, event_key, chat_id, telegram_message_id) "
             "VALUES (?, ?, ?, ?)",
             (event_type, event_key, CHAT_ID, str(telegram_message_id)),
+        )
+        conn.execute(
+            "UPDATE notification_log SET snoozed_until=NULL "
+            "WHERE event_type=? AND event_key=? AND chat_id=? "
+            "AND snoozed_until IS NOT NULL AND snoozed_until <= ?",
+            (event_type, event_key, CHAT_ID, _now_utc_iso()),
         )
 
 
@@ -365,7 +393,7 @@ def _outbound_loop() -> None:
 # Inbound — long-poll Telegram, route replies back to the API.
 # ---------------------------------------------------------------------------
 
-# Slash command grammar (v0.5.0-mvp2 + v0.6.1):
+# Slash command grammar (v0.5.0-mvp2 + v0.6.1 + v0.6.2):
 #
 #   /answer <decision_id> <body>          → answer a pending decision     (v0.3.0)
 #   /reply  <inbox_id>    <body>          → reply to an inbox message     (v0.3.0)
@@ -373,17 +401,29 @@ def _outbound_loop() -> None:
 #   /cancel  <task_id>                    → cancel pending / risk-gated   (v0.5.0-mvp2, FR18)
 #   /run <prompt>                         → POST /api/tasks                (v0.5.0-mvp2, FR1-4)
 #   /status                               → read-only telemetry snapshot   (v0.6.1, Phase 2)
+#   /snooze <decision_id> [duration]      → suppress re-fire for window    (v0.6.2, Phase 2)
 #
 # Two patterns because `/run` doesn't take a leading int ID — keeping the
 # verbs in one regex would force a body for every verb. The body group is
 # optional in _CMD_WITH_ID_RE so /approve and /cancel parse without one.
 # `/status` is a third sibling — strict whole-message match, no args.
 _CMD_WITH_ID_RE = re.compile(
-    r"^/(answer|reply|approve|cancel)\s+(\d+)(?:\s+(.+))?$",
+    r"^/(answer|reply|approve|cancel|snooze)\s+(\d+)(?:\s+(.+))?$",
     re.IGNORECASE | re.DOTALL,
 )
 _CMD_RUN_RE = re.compile(r"^/run\s+(.+)$", re.IGNORECASE | re.DOTALL)
 _CMD_STATUS_RE = re.compile(r"^/status\s*$", re.IGNORECASE)
+# v0.6.2 — bare `/snooze` or `/snooze 30m` (no ID) inside a reply-to-msg
+# branch; ID resolves via _lookup_by_tg_message on the quoted notification.
+_CMD_SNOOZE_REPLY_RE = re.compile(
+    r"^/snooze(?:\s+(\d+)([mhd]))?\s*$",
+    re.IGNORECASE,
+)
+# v0.6.2 — strict duration grammar for explicit-ID snooze. Empty / None
+# defaults to 30m at the parser level (`_parse_snooze_duration`).
+_SNOOZE_DURATION_RE = re.compile(r"^\s*(\d+)([mhd])\s*$", re.IGNORECASE)
+_SNOOZE_DEFAULT_S = 30 * 60
+_SNOOZE_CAP_S = 24 * 3600
 
 # `/run` prompt cap — amendment says 3000 chars (PRD says 4000 for outbound
 # body truncation, but inbound /run uses the tighter limit to match the
@@ -538,6 +578,127 @@ def _handle_cancel(chat_id: Any, message_id: Any, task_id: int) -> None:
                         f"⚠️ cancel failed · {code} · {safe_body}")
         else:
             _reply_text(chat_id, message_id, f"⚠️ cancel failed · {safe_body}")
+
+
+# ---------------------------------------------------------------------------
+# /snooze — v0.6.2, Phase 2.
+# ---------------------------------------------------------------------------
+#
+# Suppress the outbound re-fire cycle for a single decision until the window
+# elapses. Writes `notification_log.snoozed_until` (column shipped dormant
+# in v0.3.0) and an `activities` audit row tagged `decision_snoozed` with
+# `source='telegram'` — matches mvp2's FR19 audit-everything-from-Telegram
+# pattern for state-changing commands. Departs from v0.6.1 `/status`'s
+# no-audit policy on purpose: this mutates dedupe state.
+
+def _parse_snooze_duration(s: Optional[str]) -> tuple[Optional[int], Optional[str], bool]:
+    """Parse a `Nm|Nh|Nd` duration string. Returns
+    `(seconds, normalized_label, capped)`. Empty/None → default 30m. Bad
+    input → `(None, None, False)` so the caller can emit a usage hint."""
+    if s is None or not s.strip():
+        return _SNOOZE_DEFAULT_S, "30m", False
+    m = _SNOOZE_DURATION_RE.match(s)
+    if not m:
+        return None, None, False
+    n = int(m.group(1))
+    unit = m.group(2).lower()
+    if n <= 0:
+        return None, None, False
+    if unit == "m":
+        secs = n * 60
+    elif unit == "h":
+        secs = n * 3600
+    else:
+        secs = n * 86400
+    if secs > _SNOOZE_CAP_S:
+        return _SNOOZE_CAP_S, "24h", True
+    return secs, f"{n}{unit}", False
+
+
+def _future_local_str(seconds_ahead: int) -> str:
+    """Local-tz `HH:MM GMT+7` for `now + seconds_ahead`. Matches the
+    v0.6.1 `_now_local_str()` convention so re-fire times read identically
+    to the `/status` header timestamp."""
+    target = _now_local() + timedelta(seconds=seconds_ahead)
+    if _LOCAL_TZ:
+        return target.strftime("%H:%M GMT+7")
+    return target.strftime("%H:%M")
+
+
+def _handle_snooze(chat_id: Any, message_id: Any, decision_id: int,
+                   duration_str: Optional[str]) -> None:
+    """`/snooze <decision_id> [Nm|Nh|Nd]` — suppress the next re-fire(s)
+    for a pending decision until the window elapses. Decisions only for
+    MVP (FR per amendment); inbox / task_complete / risk_gated are rejected
+    upstream by the reply-to-msg dispatcher.
+
+    NFR11: malformed input never crashes the long-poll loop — bad duration
+    strings, missing rows, and DB errors all emit usage hints / error
+    replies and return cleanly."""
+    secs, normalized, capped = _parse_snooze_duration(duration_str)
+    if secs is None:
+        _reply_text(chat_id, message_id,
+                    "usage: `/snooze <decision_id> [30m|2h|1d]` — default 30m")
+        return
+
+    try:
+        with db.connect() as conn:
+            drow = conn.execute(
+                "SELECT id, status FROM ops_decisions WHERE id=?",
+                (decision_id,),
+            ).fetchone()
+            if not drow:
+                _reply_text(chat_id, message_id,
+                            f"decision `#{decision_id}` not found")
+                return
+            if drow["status"] != "pending":
+                _reply_text(chat_id, message_id,
+                            f"decision `#{decision_id}` already answered")
+                return
+
+            nrow = conn.execute(
+                "SELECT id FROM notification_log "
+                "WHERE event_type='decision' AND event_key=? AND chat_id=? "
+                "LIMIT 1",
+                (str(decision_id), CHAT_ID),
+            ).fetchone()
+            if not nrow:
+                _reply_text(chat_id, message_id,
+                            f"decision `#{decision_id}` not yet notified "
+                            f"— cannot snooze")
+                return
+
+            target_iso = (datetime.now(timezone.utc) + timedelta(seconds=secs)
+                          ).strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                "UPDATE notification_log SET snoozed_until=? WHERE id=?",
+                (target_iso, nrow["id"]),
+            )
+            conn.execute(
+                "INSERT INTO activities(event_type, detail) "
+                "VALUES ('decision_snoozed', ?)",
+                (json.dumps({
+                    "decision_id": decision_id,
+                    "duration": normalized,
+                    "snoozed_until": target_iso,
+                    "source": "telegram",
+                }),),
+            )
+    except Exception as exc:
+        print(f"[telegram] /snooze failed: {exc!r}", file=sys.stderr)
+        _reply_text(chat_id, message_id,
+                    f"⚠️ snooze failed · {_md_safe(str(exc))[:200]}")
+        return
+
+    wake = _future_local_str(secs)
+    if capped:
+        _reply_text(chat_id, message_id,
+                    f"⚠️ max 24h — capped · ✅ decision `#{decision_id}` "
+                    f"snoozed for 24h — next re-fire {wake}")
+    else:
+        _reply_text(chat_id, message_id,
+                    f"✅ decision `#{decision_id}` snoozed for {normalized} "
+                    f"— next re-fire {wake}")
 
 
 # ---------------------------------------------------------------------------
@@ -826,17 +987,19 @@ def _handle_status(chat_id: Any) -> None:
 def _handle_message(msg: dict) -> None:
     """Process a single Telegram message — reply-to or slash-command.
 
-    Routing order (v0.5.0-mvp2 + v0.6.1):
+    Routing order (v0.5.0-mvp2 + v0.6.1 + v0.6.2):
       1. reply-to-message → lookup notification_log
+         - decision  + body `/snooze [Nm|Nh|Nd]` → _handle_snooze  (v0.6.2)
          - decision  → POST /api/decisions/{id}/answer  (v0.3.0)
          - inbox     → POST /api/inbox/{id}/reply       (v0.3.0)
          - risk_gated → /approve <task_id>              (v0.5.0-mvp2, FR17)
       2. slash command
-         - /status           → _handle_status           (v0.6.1, Phase 2)
-         - /answer | /reply  → existing route_reply     (v0.3.0)
-         - /run <prompt>     → _handle_run              (v0.5.0-mvp2, FR1-4)
-         - /approve <id>     → _handle_approve          (v0.5.0-mvp2, FR16)
-         - /cancel <id>      → _handle_cancel           (v0.5.0-mvp2, FR18)
+         - /status                  → _handle_status    (v0.6.1, Phase 2)
+         - /answer | /reply         → existing route_reply (v0.3.0)
+         - /run <prompt>            → _handle_run       (v0.5.0-mvp2, FR1-4)
+         - /approve <id>            → _handle_approve   (v0.5.0-mvp2, FR16)
+         - /cancel <id>             → _handle_cancel    (v0.5.0-mvp2, FR18)
+         - /snooze <id> [duration]  → _handle_snooze    (v0.6.2, Phase 2)
       3. /help | /start → usage text
     """
     chat = (msg.get("chat") or {}).get("id")
@@ -865,6 +1028,28 @@ def _handle_message(msg: dict) -> None:
                     except (ValueError, TypeError):
                         _reply_text(chat, message_id,
                                     f"⚠️ bad task id in notification_log: {event_key!r}")
+                    return
+                # v0.6.2 — reply-to-DECISION-msg body `/snooze [duration]`
+                # routes to _handle_snooze with the looked-up decision id.
+                # Scope: decisions only for MVP — non-decision targets fall
+                # through to the answer-route below where they'll fail
+                # gracefully (inbox would treat `/snooze 30m` as a literal
+                # reply body, which is wrong but non-destructive).
+                m_snooze_reply = _CMD_SNOOZE_REPLY_RE.match(text)
+                if m_snooze_reply and event_type == "decision":
+                    n_str = m_snooze_reply.group(1)
+                    unit_str = m_snooze_reply.group(2)
+                    dur = f"{n_str}{unit_str}" if n_str else None
+                    try:
+                        _handle_snooze(chat, message_id, int(event_key), dur)
+                    except (ValueError, TypeError):
+                        _reply_text(chat, message_id,
+                                    f"⚠️ bad decision id in notification_log: {event_key!r}")
+                    return
+                if m_snooze_reply and event_type != "decision":
+                    _reply_text(chat, message_id,
+                                f"snooze is decisions-only — this is a "
+                                f"{event_type} notification")
                     return
                 try:
                     if _route_reply(event_type, event_key, text):
@@ -941,6 +1126,13 @@ def _handle_message(msg: dict) -> None:
         elif verb == "cancel":
             _handle_cancel(chat, message_id, ref_id)
             return
+        elif verb == "snooze":
+            # `ref_id` is the decision_id; `body` is the optional duration
+            # (the with-ID regex's group(3) is named `body` but its job for
+            # snooze is to carry `30m` / `2h` / `1d`). None or empty →
+            # default 30m inside _handle_snooze.
+            _handle_snooze(chat, message_id, ref_id, body)
+            return
 
     # 2d. Bare /run, /approve, /cancel without args → usage hint (NFR11).
     # /status with stray args (e.g. `/status foo`) falls through here too —
@@ -953,6 +1145,10 @@ def _handle_message(msg: dict) -> None:
         return
     if bare in ("/approve", "/cancel"):
         _reply_text(chat, message_id, f"usage: `{bare} <task_id>` — numeric id required.")
+        return
+    if bare == "/snooze":
+        _reply_text(chat, message_id,
+                    "usage: `/snooze <decision_id> [30m|2h|1d]` — default 30m")
         return
 
     # 3. Help fallthrough.
@@ -969,8 +1165,10 @@ def _handle_message(msg: dict) -> None:
                 "`/reply <id> <text>` — reply to an inbox message\n"
                 "`/run <prompt>` — queue a new headless task\n"
                 "`/approve <task_id>` — override a risk-gated task\n"
-                "`/cancel <task_id>` — cancel a pending / risk-gated task\n\n"
-                "_Reply to a_ 🛑 _RISK-GATED notification with any text to approve._"
+                "`/cancel <task_id>` — cancel a pending / risk-gated task\n"
+                "`/snooze <decision_id> [30m|2h|1d]` — suppress re-fire (default 30m, max 24h)\n\n"
+                "_Reply to a_ 🛑 _RISK-GATED notification with any text to approve._\n"
+                "_Reply to a_ ❓ _DECISION notification with_ `/snooze [duration]` _to defer it._"
             ),
             "parse_mode": "Markdown",
         })

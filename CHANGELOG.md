@@ -1,19 +1,18 @@
 # Changelog
 
-## v0.6.2 — DRAFT spec: Telegram `/snooze <decision_id> [duration]`
+## v0.6.2 — Telegram `/snooze <decision_id> [duration]`
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.2-amendment.md`,
-applied on top of current `main` HEAD (post v0.6.1).
-
-Second Phase 2 feature from the Telegram Remote Trigger PRD. Bridge-
-only — single file change to `telegram_bridge.py` plus this CHANGELOG
-entry. No schema changes (column `notification_log.snoozed_until`
-already exists, has been unused since v0.3.0), no new endpoints, no
-breaking changes.
+applied on top of current `main` HEAD (post v0.6.1). Second Phase 2
+feature from the Telegram Remote Trigger PRD
+(`command-centre/docs/prd-telegram-remote.md`). Bridge-only — single
+file change to `telegram_bridge.py` plus this CHANGELOG entry. No
+schema changes (column `notification_log.snoozed_until` already exists,
+has been unused since v0.3.0), no new endpoints, no breaking changes.
 
 Numbered `v0.6.2` (patch over v0.6.1) — even tighter scope, same
-subsystem.
+Telegram-bridge subsystem.
 
 ### Why this release
 
@@ -21,46 +20,160 @@ A decision pings, operator can't answer now (meeting, call, asleep),
 outbound tick re-fires every 30s. Today: answer half-mind or mute the
 whole chat. `/snooze 42 30m` says "remind me in 30 min" — notification
 suppressed during the window, re-fires once after elapse, then default
-dedupe resumes.
+dedupe resumes. Matches the phone "snooze button" UX, then revert.
 
 The wire was designed in v0.3.0 (`snoozed_until` column + intent noted
-in original CHANGELOG) but never built. This release finishes that
+in the original CHANGELOG) but never built. This release finishes that
 work.
 
-### What's planned
+### What ships
+
+All changes in `command-centre/scripts/telegram_bridge.py` (+170 / -6)
+plus a dev smoke script (`scripts/dev/smoke_v0_6_2.py`). No new
+dependencies, stdlib only.
 
 - **`/snooze <decision_id> [duration]`** slash command. Extends
-  `_CMD_WITH_ID_RE` from `(answer|reply|approve|cancel)` to add
-  `snooze`. Duration optional, defaults to `30m`; format `Nm|Nh|Nd`;
-  capped at 24h.
-- **`_handle_snooze`** — parse duration, look up notification_log row,
-  UPDATE `snoozed_until`, audit-log to `activities` with
-  `source='telegram'` (FR19 pattern), reply with wake-time confirmation.
-- **Fix `_already_notified`** to respect `snoozed_until`. Currently
-  blocks unconditionally when a row exists; after fix, returns False
-  when `snoozed_until <= now()` so the outbound tick re-fires once.
+  `_CMD_WITH_ID_RE` from `(answer|reply|approve|cancel)` to
+  `(answer|reply|approve|cancel|snooze)`. The body group is already
+  optional, so `/snooze 42` (no duration) parses cleanly and defaults
+  to 30m inside the handler.
+- **`_handle_snooze(chat_id, message_id, decision_id, duration_str)`** —
+  parse duration via the strict `^(\d+)([mhd])$` grammar, verify the
+  decision exists and is still pending (direct `ops_decisions` query),
+  verify a `notification_log` row exists for this decision + chat,
+  `UPDATE notification_log SET snoozed_until=?` to `now_utc + duration`,
+  and insert an `activities(event_type='decision_snoozed', detail=…)`
+  row with `source='telegram'` — matches mvp2's FR19 audit-everything-
+  from-Telegram pattern for state-changing commands. Reply with
+  `✅ decision #{id} snoozed for {duration} — next re-fire {HH:MM GMT+7}`
+  using a new `_future_local_str(seconds_ahead)` helper alongside
+  v0.6.1's `_now_local_str`.
+- **`_now_utc_iso()`** sibling to `_now_local_str()` — returns
+  `YYYY-MM-DD HH:MM:SS` UTC matching SQLite's `datetime('now')` so
+  `notification_log.snoozed_until` comparisons stay lexicographic.
+- **Fix `_already_notified`** to respect `snoozed_until`. Previously
+  blocked unconditionally on any matching row; now returns False when
+  `snoozed_until <= now_utc_iso()`, letting the outbound tick re-fire
+  once after the window elapses. Behaviour change is invisible to
+  operators until they actually use `/snooze` — the column has been
+  NULL on every existing row since v0.3.0, so `_already_notified`
+  still returns True for those (NULL branch).
 - **Fix `_record_notify`** to clear `snoozed_until` back to NULL after
-  a re-fire, so dedupe reverts to default permanent-block.
+  a re-fire. The existing `INSERT OR IGNORE` is a no-op for an existing
+  row, so without this fix the past `snoozed_until` would persist and
+  the next tick would re-fire forever. New trailing `UPDATE … SET
+  snoozed_until=NULL WHERE … AND snoozed_until <= ?` makes the
+  semantics: snooze → wait → re-fire ONCE → permanent dedupe (unless
+  operator re-snoozes).
 - **Reply-to-msg snooze** — reply to a decision notification with
-  `/snooze 30m` (no ID); `_lookup_by_tg_message` resolves the
-  decision_id. Mirrors mvp2's reply-to-RISK-GATED → approve pattern.
+  `/snooze 30m` (no ID) and the bridge resolves the decision_id via
+  `_lookup_by_tg_message`. New `_CMD_SNOOZE_REPLY_RE` matches the
+  `/snooze` or `/snooze <duration>` shorthand inside the reply-to-msg
+  branch. Mirrors mvp2's reply-to-RISK-GATED → `/approve` pattern.
+  Non-decision targets reject with `snooze is decisions-only — this
+  is a {event_type} notification`.
 - **Scope: decisions only.** Inbox / task-complete / risk-gated snooze
-  deferred — different UX shapes, defer until usage signals demand.
+  deferred — different UX shapes (inbox rarely re-fires; task-complete
+  fires once; risk-gated has `/approve` + `/cancel` as the natural
+  resolution). Generalisation waits for usage signal.
+- **NFR11.** Malformed input (`/snooze`, `/snooze abc`, `/snooze 42
+  wat`, `/snooze 42 0m`, `/snooze 42 -1m`, `/snooze 42 30s`) reply
+  with the usage hint and never raise. Duration parsing is strict;
+  no natural-language fallback.
+- **24h cap.** `^(\d+)([mhd])$` matches, but the parser clamps to
+  86400 s and the reply prefixes `⚠️ max 24h — capped · ` so the
+  operator sees both the cap notice and the success confirmation in a
+  single message. Operator can re-snooze for longer chains if they
+  genuinely want.
+- **`/help` text** extended with the new verb and a `Reply to a ❓
+  DECISION notification with /snooze [duration] to defer it.`
+  footer line.
 
 ### Schema delta
 
 None. `notification_log.snoozed_until` exists since v0.3.0; this
-release wires it up.
+release wires it up. Pre-existing rows on every install have
+`snoozed_until IS NULL`, so the `_already_notified` semantic change
+is invisible until the first `/snooze` writes a non-null value.
 
-### Status
+### Verified
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+`command-centre/scripts/dev/smoke_v0_6_2.py` walks all 12 amendment
+stop conditions against a real FastAPI server on `127.0.0.1:8866`
+(spawned in a temp `$CC_INSTALL_DIR` so the migration runs fresh) and
+a stubbed `_tg` capture so no real Bot API call is made. **39 / 39
+checks pass.**
 
-Estimate: ~1h. Smallest Phase 2 win in the corpus — most of the
-plumbing (column, dedupe loop, audit table) already exists.
+- **S1 — happy path with default duration.** `/snooze 42` (no body)
+  sets `snoozed_until ≈ now + 30m`, replies
+  `✅ decision #42 snoozed for 30m — next re-fire HH:MM GMT+7`, and
+  `_already_notified('decision', '42')` flips to True.
+- **S2 — explicit duration.** `/snooze 42 2h` sets `snoozed_until ≈
+  now + 7200s`, reply mentions `2h`.
+- **S3 — re-snooze.** Two consecutive snoozes (30m then 2h) advance
+  the timer; second `snoozed_until` is later than the first by ≈ 5400s
+  net (90 minutes minus the 1s sleep between the calls).
+- **S4 — re-fire after elapse.** Hand-UPDATE `snoozed_until` to 30s in
+  the past; `_already_notified` returns False; calling `_record_notify`
+  (what the outbound tick would call after a re-send) clears
+  `snoozed_until` back to NULL; the next `_already_notified` returns
+  True. No re-fire loop.
+- **S5 — reply-to-msg snooze.** Synthetic `reply_to_message` pointing
+  at the seeded `telegram_message_id` resolves the decision via
+  `_lookup_by_tg_message` and snoozes correctly. Bare `/snooze` (no
+  duration) in the reply branch uses the 30m default.
+- **S6 — malformed duration.** `wat` / `42 wat` / `0m` / `-1m` /
+  `30s` all reply with the usage hint and leave `snoozed_until`
+  untouched. The long-poll loop does not raise.
+- **S7 — cap at 24h.** `/snooze 42 7d` clamps to `now + 86400s`,
+  reply leads with `⚠️ max 24h — capped`.
+- **S8 — non-existent decision.** `/snooze 9999` replies `decision
+  #9999 not found`.
+- **S9 — already-answered decision.** Manually flip `ops_decisions.
+  status='answered'`, then `/snooze` replies `decision #{id} already
+  answered`. `snoozed_until` stays NULL.
+- **S10 — not-yet-notified decision.** Pending decision in DB but no
+  `notification_log` row → reply `decision #{id} not yet notified —
+  cannot snooze`.
+- **S11 — audit log.** Each successful `/snooze` writes
+  `activities(event_type='decision_snoozed', detail={decision_id,
+  duration, snoozed_until, source: 'telegram'})`.
+- **S12 — backward compat.** All existing regexes (`_CMD_WITH_ID_RE`,
+  `_CMD_RUN_RE`, `_CMD_STATUS_RE`) continue to match `/answer`,
+  `/reply`, `/approve`, `/cancel`, `/run`, `/status`. End-to-end
+  `/answer` still flips a decision to `'answered'`. `/help` renders
+  the usage card and now includes the `/snooze` line.
+
+### Operator flow
+
+```bash
+cc restart                    # no migration this release; bridge restarts.
+# In Telegram (operator chat):
+/snooze 42                    # default 30m — outbound tick stops re-firing
+/snooze 42 2h                 # custom window
+/snooze 42 7d                 # ⚠️ max 24h — capped (re-snooze for longer)
+# Reply to a ❓ DECISION ping with `/snooze 30m` — no ID needed.
+```
+
+### Tunables
+
+No new env vars. The 24h cap and 30m default are intentionally hard-
+coded — different operators wanting different defaults is a v0.7+
+concern, not Phase 2.
+
+### Not in this release (deferred — other Phase 2 features)
+
+- **Generalised snooze** for inbox / risk_gated / task_complete event
+  types — defer until concrete usage signals demand it. Different UX
+  shapes; risk_gated already has `/approve` + `/cancel` as the natural
+  resolution.
+- **`/snoozes` listing command** showing active snoozes with wake
+  times. Adding `N snoozed` to `/status` (v0.6.1) is a v0.7
+  enhancement.
+- **`/unsnooze 42`** to clear the timer early — operator workaround is
+  `/answer 42 …` which clears the dedupe row anyway.
+- **Per-event-type snooze caps** (e.g., risk_gated cannot be snoozed
+  > 1h) — premature; single 24h cap for now.
 
 ---
 
