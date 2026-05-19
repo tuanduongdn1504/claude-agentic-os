@@ -1,69 +1,165 @@
 # Changelog
 
-## v0.6.1 — DRAFT spec: Telegram `/status` snapshot
+## v0.6.1 — Telegram `/status` snapshot
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.1-amendment.md`,
-applied on top of current `main` HEAD (post v0.5.0-mvp2).
-
-Phase 2 feature from the Telegram Remote Trigger PRD
+applied on top of current `main` HEAD (post v0.5.0-mvp2). First Phase 2
+feature from the Telegram Remote Trigger PRD
 (`command-centre/docs/prd-telegram-remote.md`). Bridge-only — single
 file change to `telegram_bridge.py` plus this CHANGELOG entry. No
 schema changes, no new endpoints, no breaking changes.
 
 Numbered `v0.6.1` (patch-level over v0.6.0) — small additive feature
-confined to the Telegram bridge subsystem. Alternative `v0.7.0` would
-be more semver-correct for a new feature but increments the minor
-faster than the rhythm of this codebase warrants.
+confined to the Telegram bridge subsystem.
 
 ### Why this release
 
-mvp1 + mvp2 shipped the read/write Telegram loop. The remaining gap is
+mvp1 + mvp2 shipped the read/write Telegram loop. The remaining gap was
 **passive awareness**: between active operations, the operator's most
-common question is "What's my agent doing right now?" — and today the
-answer requires opening the dashboard. `/status` collapses the
-KpiRow + DispatcherStrip + AttentionBar + live sessions view into a
+common question is "What's my agent doing right now?" — and the answer
+required opening the dashboard. `/status` collapses the
+KpiRow + DispatcherStrip + AttentionBar + live-sessions view into a
 single Telegram reply.
 
 This is the first feature in the corpus designed for glanceable
 telemetry, not active control. Expected use pattern is multiple times
 per day — morning check, lunch break, post-meeting, before bed.
 
-### What's planned
+### What ships
 
-- **`/status` slash command** in `telegram_bridge.py`. New regex
-  `_CMD_STATUS_RE` (no args, whole-message match). New routing branch
-  in `_handle_message`.
+All changes in `command-centre/scripts/telegram_bridge.py` (+222 / -4)
+plus two dev smoke scripts (`scripts/dev/smoke_status_format.py`,
+`scripts/dev/smoke_v0_6_1.py`). No new dependencies, stdlib only.
+
+- **Inbound `/status` parser.** New `_CMD_STATUS_RE` (third sibling to
+  `_CMD_WITH_ID_RE` and `_CMD_RUN_RE`) — strict whole-message match
+  `^/status\s*$`, no args. `/status foo` does not match the regex and
+  falls through to the `/help` branch (NFR11).
 - **`_handle_status(chat_id)`** — fetches 5 read-only GET endpoints
-  (`/api/system/dispatcher`, `/api/decisions`, `/api/sessions/live`,
-  `/api/tasks`, `/api/system/state`), per-call try/except, formats via
-  `_format_status`. Total round-trip <1s for a single operator's local
-  install.
-- **`_format_status(...)`** — multi-line Markdown V1 message.
-  Mobile-readable (390 px width, no horizontal scroll). Steady state
-  ~4-6 lines. Conditional alerts (emergency stop, cost cap,
-  back-pressure) appended only when active to keep the message tight.
-- **No audit-log row** — deliberately. `/status` is read-only, not a
-  state-changing operator action. Departs from mvp2's
-  audit-everything-from-Telegram pattern for state-changers.
-- **Partial-failure resilience** — failed endpoints show `?` for their
-  metric, footer line `_some metrics unavailable — see logs_`. Total
-  server failure shows a clear "dashboard down?" message with
-  `cc status` / `cc restart` hints.
+  in sequence with per-call try/except:
+  - `GET /api/system/dispatcher` — running, max_concurrent, free_slots,
+    `today_cost_api_pool_usd`, `today_cost_max_sub_usd`,
+    `daily_cost_cap_usd`, `cost_capped`, `back_pressure`,
+    `hard_risk_gate`
+  - `GET /api/decisions?status=pending` — count via `len(items)`
+  - `GET /api/sessions/live` — count + longest-running age computed
+    from `started_at` (parsed as UTC, age in seconds since
+    `datetime.now(timezone.utc)`)
+  - `GET /api/tasks?status=done|failed|awaiting_approval` — three
+    calls, today-bucketed client-side (`completed_at` for done/failed,
+    `created_at` for awaiting_approval; timestamps parsed as UTC and
+    projected into local-tz `YYYY-MM-DD` before comparison)
+  - `GET /api/system/state` — checks
+    `state.emergency_stop.value == "1"`
+- **`_format_status(metrics)`** — Markdown V1, mobile-readable.
+  Steady state 5–6 lines:
+
+  ```
+  *STATUS*  _14:32 GMT+7_
+
+  ⚙️  Dispatcher  *2/3* running · *1* free
+  💰 Today        api *$3.42* · max *$1.18* · cap $10.00
+  📨 Decisions    *2* pending          ← omitted when count = 0
+  🟢 Live         *1* session · 4m active   ← omitted when count = 0
+  ✅ Tasks today  5 done · 1 failed · 0 risk-gated   ← always shown
+  ```
+
+  Conditional alerts appended only when their state is active:
+
+  ```
+  🛑 *Emergency stop ON* — dispatcher refusing new work
+  ⚠️  *Cost cap reached* (api_pool $10.00 / $10.00)
+  ⚠️  *Back-pressure active* — 3/3 slots full
+  ```
+
+- **Time helpers** — `_now_local()` / `_now_local_str()` /
+  `_today_local_date()` pinned to `Asia/Ho_Chi_Minh` via stdlib
+  `zoneinfo` (Python 3.9+; falls back to naive system local time if
+  zoneinfo isn't available — the `GMT+7` suffix drops but the format
+  otherwise renders). Matches the v0.5.0-mvp1 timezone-fix convention
+  (commit `a505d24`).
+- **No audit-log row.** Deliberate departure from mvp2's audit-
+  everything-from-Telegram pattern. `/status` is read-only telemetry,
+  not a state-changing operator action — no `activities` insert.
+- **Partial-failure resilience.** Failed endpoints render `?` for
+  their metric and a footer line `_some metrics unavailable — see
+  logs_`. Total server failure (every endpoint refused or timed out)
+  short-circuits to `⚠️ status check failed — dashboard server may
+  be down. Try `cc status` or `cc restart`.` and never crashes the
+  inbound long-poll loop (NFR11).
+- **`/help` text** extended with the new verb.
 
 ### Schema delta
 
-None. Read-only feature, all data sourced from existing endpoints.
+None. All data sourced from existing endpoints; only the bridge
+subsystem changes.
 
-### Status
+### Verified
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+`command-centre/scripts/dev/smoke_v0_6_1.py` walks all 6 amendment
+stop conditions against a real FastAPI server on `127.0.0.1:8765`
+(with the freshly-migrated v0.6.0 DB seeded with one pending
+decision + one done task + one risk-gated task + one live session)
+and a stubbed `_send_message`. 20 checks pass.
 
-Estimate: 1-2h. Lower than mvp2 (3-4h) because scope is intentionally
-narrow — single file, no schema, no new endpoints.
+- **S1 — happy path.** `/status` returns the four steady-state lines
+  (Dispatcher, Today, Decisions, Live, Tasks today) plus the italic
+  `*STATUS*  _HH:MM GMT+7_` header.
+- **S2 — cost-cap alert.** Fixture with `cost_capped=true` renders the
+  `⚠️ Cost cap reached (api_pool $X.XX / $Y.YY)` line; clearing the
+  flag removes it.
+- **S3 — emergency stop.** `POST /api/system/emergency-stop` →
+  `/status` reply includes `🛑 Emergency stop ON`. `POST
+  /api/system/emergency-resume` → alert line gone.
+- **S4 — partial failure.** Pointing the bridge at a closed port (no
+  server) renders the fallback `⚠️ status check failed — dashboard
+  server may be down. Try `cc status` or `cc restart`.` and the
+  inbound loop continues without exception.
+- **S5 — mobile render.** Worst-case line length is 54 chars (happy +
+  alerts fixtures); under the 60-char ceiling that keeps the
+  "table-ish" alignment readable on 390 px iPhone before Telegram's
+  client wraps. No horizontal scroll under any fixture (NFR4
+  satisfied — mobile clients always vertical-wrap text).
+- **S6 — backward compat.** `_CMD_WITH_ID_RE` and `_CMD_RUN_RE`
+  unchanged. `/answer`, `/reply`, `/run`, `/approve`, `/cancel`,
+  `/help`, `/start` all still route correctly. `/status foo` and
+  `/statusfoo` fall through to `/help` as required by NFR11.
+
+A parallel fixture-only smoke
+(`command-centre/scripts/dev/smoke_status_format.py`) renders five
+named scenarios (happy / idle / all-alerts / partial / dispatcher-only)
+against `_format_status` directly with no HTTP, useful for locking
+template changes without a running server.
+
+### Operator flow
+
+```bash
+cc restart                    # no migration this release; bridge restarts.
+# In Telegram (operator chat):
+/status                       # → 5-6 line snapshot, optional alerts
+```
+
+### Tunables
+
+No new env vars. The bridge uses the existing
+`CC_DASHBOARD_URL` / `CC_HOST` / `CC_PORT` resolution from earlier
+releases. Local-tz handling honours `Asia/Ho_Chi_Minh` via stdlib
+zoneinfo — no `TZ` env var or `tzdata` package needed on macOS.
+
+### Not in this release (deferred — other Phase 2 features)
+
+- **`/snooze <decision_id> <duration>`** wires up the existing
+  `notification_log.snoozed_until` column. Spec separately if signal
+  supports it after `/status` lands.
+- **Inline keyboard `[Yes] [No]` for binary DECISIONS** — needs a
+  "what's binary?" heuristic; defer until concrete examples
+  accumulate.
+- **`/schedule "<cron>" <prompt>`** creates `ops_schedules` rows from
+  TG — dashboard `ScheduleComposer` handles this well, TG-only use
+  case is rare.
+- **Reply-to-task-complete starts a follow-up `/run`** — chained
+  workflows; defer until usage signals demand it.
 
 ---
 
