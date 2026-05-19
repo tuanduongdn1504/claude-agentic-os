@@ -34,20 +34,55 @@ async def usage_tokens(range: str = "7d") -> dict[str, Any]:
             """,
             params,
         ).fetchall()
+        # v0.6.0 — per-day cost split. token_usage has no cost column; pull
+        # it from sessions and bucket by started_at local-date + cost_source.
+        sess_pred, sess_params = timerange.sql_predicate(range, "started_at")
+        cost_rows = conn.execute(
+            f"""
+            SELECT DATE(started_at, 'localtime') AS date,
+                   COALESCE(cost_source, 'unknown') AS src,
+                   COALESCE(SUM(cost_usd), 0) AS cost
+            FROM sessions
+            WHERE {sess_pred} AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY date, src
+            """,
+            sess_params,
+        ).fetchall()
+
+    cost_by_date: dict[str, dict[str, float]] = {}
+    for r in cost_rows:
+        d = r["date"]
+        if not d:
+            continue
+        bucket = cost_by_date.setdefault(d, {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0})
+        bucket[r["src"]] = round(float(r["cost"] or 0.0), 6)
 
     totals = {"input": 0, "output": 0, "cache_read": 0, "cache_create": 0, "total": 0}
+    daily = []
     for r in rows:
+        rd = dict(r)
+        rd["cost_by_source"] = cost_by_date.get(
+            r["date"], {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0},
+        )
+        daily.append(rd)
         totals["input"] += r["input_tokens"] or 0
         totals["output"] += r["output_tokens"] or 0
         totals["cache_read"] += r["cache_read_tokens"] or 0
         totals["cache_create"] += r["cache_create_tokens"] or 0
-    totals["total"] = sum(totals.values()) - totals["total"]  # defensive; total is recomputed below
     totals["total"] = totals["input"] + totals["output"] + totals["cache_read"] + totals["cache_create"]
+
+    # Window-wide totals by source — UI legend.
+    cost_totals = {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0}
+    for bucket in cost_by_date.values():
+        for k, v in bucket.items():
+            cost_totals[k] += v
+    cost_totals = {k: round(v, 6) for k, v in cost_totals.items()}
 
     return {
         "range": timerange.normalize(range),
-        "daily": [dict(r) for r in rows],
+        "daily": daily,
         "totals": totals,
+        "cost_by_source": cost_totals,
     }
 
 

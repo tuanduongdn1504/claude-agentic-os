@@ -28,11 +28,15 @@ QUEUE_DIR = Path(os.environ.get("CC_QUEUE_DIR") or
 # List + details
 # ---------------------------------------------------------------------------
 
+_COST_SOURCES = ("api_pool", "max_sub", "unknown", "codex_api")
+
+
 @router.get("/api/sessions")
 async def list_sessions(
     range: str = "7d",
     source: Optional[str] = None,
     model: Optional[str] = None,
+    cost_source: Optional[str] = None,
     limit: int = 100,
     q: Optional[str] = None,
     offset: int = 0,
@@ -43,6 +47,11 @@ async def list_sessions(
         clauses.append("source = ?"); params.append(source)
     if model:
         clauses.append("model = ?"); params.append(model)
+    if cost_source:
+        if cost_source not in _COST_SOURCES:
+            raise HTTPException(400, f"cost_source must be one of {_COST_SOURCES}")
+        clauses.append("COALESCE(cost_source,'unknown') = ?")
+        params.append(cost_source)
     if q:
         clauses.append("(title LIKE ? OR cwd LIKE ? OR session_id LIKE ?)")
         like = f"%{q}%"
@@ -58,7 +67,8 @@ async def list_sessions(
                    started_at, ended_at, duration_ms,
                    input_tokens, output_tokens, cache_read_tokens, cache_create_tokens,
                    total_tokens, effective_tokens, cost_usd, error_count, is_error_any,
-                   rate_limit_hit, stop_reason, service_tier
+                   rate_limit_hit, stop_reason, service_tier,
+                   COALESCE(cost_source, 'unknown') AS cost_source
             FROM sessions
             WHERE {' AND '.join(clauses)}
             ORDER BY started_at DESC
