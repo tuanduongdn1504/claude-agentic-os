@@ -145,18 +145,19 @@ from v0.2.0:
 
 ---
 
-## v0.5.0-mvp2 — DRAFT spec: Telegram bridge inbound `/run`, `/approve`, `/cancel`
+## v0.5.0-mvp2 — Telegram bridge inbound `/run`, `/approve`, `/cancel`
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.5.0-mvp2-amendment.md`,
-applied on top of current `main` HEAD (post-v0.6.0 merge).
-
-mvp2 of the Telegram Remote Trigger PRD
+applied on top of current `main` HEAD (post-v0.6.0 merge). MVP commit 2
+of 2 per the Telegram Remote Trigger PRD
 (`command-centre/docs/prd-telegram-remote.md`). Closes Journey 4 —
 operator's inbound counterpart to mvp1's outbound `task_complete` +
-`risk_gated` push. Numbered `v0.5.0-mvp2` per PRD's "MVP commit 1 of 2"
-framing; lands chronologically after v0.6.0 (version-history zigzag
-accepted).
+`risk_gated` push.
+
+Additive. No breaking changes to existing endpoints, no row drops,
+idempotent migration. Re-running the installer against any v0.5.x
+or v0.6.x install upgrades the schema in place and preserves every row.
 
 ### Why this release
 
@@ -164,30 +165,51 @@ mvp1 closed the outbound feedback loop. mvp2 closes inbound: operator
 can launch tasks (`/run <prompt>`), approve risk-gated tasks
 (`/approve <id>`), and cancel pending tasks (`/cancel <id>`) entirely
 from Telegram. Without mvp2, Journey 4 (late-night risk-gate intercept)
-has no phone-side recovery — operator must walk to the desk and open
+had no phone-side recovery — operator had to walk to the desk and open
 the dashboard.
 
-### What's planned
+### What ships
 
-- **Inbound `/run`, `/approve`, `/cancel` parsers** in
-  `telegram_bridge.py`. Splits the existing `_CMD_RE` into two patterns:
-  with-ID for `(answer|reply|approve|cancel)`, no-ID free-text for
-  `/run`. Three new handler functions; reuses `_md_safe` from mvp1.
-- **New endpoint `POST /api/tasks/{id}/cancel`** mirroring the
-  existing `/approve` pattern at `tasks.py:132`. Audit-log row to
-  `activities` tagged `source='telegram'` on success.
-- **`POST /api/tasks`** body extended with optional `created_at_source`
-  field (default `'dashboard'`). Non-breaking — existing dashboard
-  POSTs continue to work.
-- **`POST /api/tasks/{id}/approve`** extended with `?source=` query
-  param + audit-log row insert (FR19). Adds the activities INSERT if
-  not already present.
-- **`_lookup_by_tg_message` extension** — reply-to-msg on 🛑 RISK-GATED
-  notifications routes to `/approve` (FR17). Reply-to-cancel NOT
-  supported — explicit `/cancel <id>` only to avoid accidental cancels.
-- **`created_at_source` column** on `ops_tasks` for the "Async hours
-  shifted" success metric. Orthogonal with v0.6.0's `cost_source` —
-  different column, different code paths.
+All changes in `command-centre/scripts/telegram_bridge.py`,
+`command-centre/scripts/routers/tasks.py`, and
+`command-centre/scripts/db.py`. Plus a smoke harness at
+`command-centre/scripts/dev/smoke_mvp2.py`.
+
+- **Inbound `/run <prompt>` parser** (FR1-FR4). `_CMD_RE` split into
+  `_CMD_WITH_ID_RE` (for `answer|reply|approve|cancel <int_id>`) and
+  `_CMD_RUN_RE` (free-text remainder, multi-line via DOTALL). Title is
+  first 80 chars of the prompt (line breaks collapsed); description
+  carries the full prompt up to 3000 chars. Over-cap → usage hint with
+  the actual length; empty → usage hint. POSTs to `/api/tasks` with
+  `created_at_source='telegram'`.
+- **Inbound `/approve <task_id>`** (FR16) and **`/cancel <task_id>`**
+  (FR18). Thin wrappers around the API endpoints — no business logic
+  in the bridge. Each passes `?source=telegram` so the activities row
+  the backend writes is tagged for FR19 audit. 404 / 4xx error bodies
+  are surfaced to the operator verbatim (truncated to 500 chars,
+  `_md_safe`-scrubbed).
+- **Reply-to-msg on 🛑 RISK-GATED notifications** routes to
+  `_handle_approve(task_id)` (FR17). Reply-to-cancel is NOT supported —
+  explicit `/cancel <id>` only, to avoid accidental cancels from
+  casual replies.
+- **New endpoint `POST /api/tasks/{task_id}/cancel`** mirroring the
+  existing `/approve` pattern in `routers/tasks.py`. Accepts a prior
+  status of `pending` or `awaiting_approval`; returns 400 with an
+  explicit message for `running` (points to `/api/system/emergency-stop`)
+  or any terminal state. Writes `activities` row
+  `event_type='task_cancelled'` with `detail={task_id, prior_status,
+  source}` for forensic reconstruction.
+- **`POST /api/tasks/{task_id}/approve`** extended with `?source=`
+  query parameter and the matching `activities` row
+  (`event_type='task_risk_approved'`) — closes the FR19 audit gap.
+  Default `source='api'` keeps existing dashboard callers working
+  unchanged (FR24); bridge sends `'telegram'`.
+- **`POST /api/tasks`** body validator accepts an optional
+  `created_at_source` field (must be a non-empty string when present;
+  defaults to `'dashboard'`). Coexists with v0.6.0's hardcoded
+  `cost_source='api_pool'` — different columns, different concerns.
+- **`/help` text** extended with the three new verbs and a note that
+  replying to a 🛑 RISK-GATED message approves the task.
 
 ### Schema delta
 
@@ -197,19 +219,77 @@ One column, orthogonal with v0.6.0's `cost_source` migration:
 |---|---|---|---|
 | `ops_tasks` | `created_at_source` | TEXT NOT NULL | `'dashboard'` |
 
-Idempotent. Order-independent with v0.6.0 (both additive `TEXT NOT NULL
-DEFAULT` columns on `ops_tasks`).
+Through the existing `_migrate_add_column` helper. Existing rows
+backfill to `'dashboard'`. Re-runnable.
 
-### Status
+### Pre-impl spike findings
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+- `_CMD_RE` at `telegram_bridge.py:360` matched `(answer|reply)` only;
+  not extensible to `/run` (free-text, no leading int) without a split.
+  Two patterns now coexist.
+- `/api/tasks/{id}/approve` already existed (`tasks.py:135`) and used
+  HTTP 409 for status conflicts; mvp2 keeps that to avoid breaking
+  dashboard callers and adds the audit-row INSERT it was missing.
+  `/cancel` is new and uses 400 per amendment. The bridge handles both
+  uniformly — operator sees the error body either way.
+- `_lookup_by_tg_message` already accepted any `event_type` string —
+  `notification_log` rows tagged `risk_gated` by mvp1's outbound tick
+  resolved without DB changes. Only the routing branch in
+  `_handle_message` is new.
+- `ops_tasks.status` enum already included `'cancelled'` from v0.1.0.
+  No enum extension.
 
-Estimate: 3-4h per PRD (revised from earlier 1-2h — `/cancel` endpoint
-must be added from scratch). PRD's `/api/tasks/{id}/approve` already
-exists (`tasks.py:132`); status enum already includes `'cancelled'`.
+### Verified
+
+`command-centre/scripts/dev/smoke_mvp2.py` walks all 6 stop conditions
+end-to-end against a stdlib mock Bot API on port 8767 and a real
+FastAPI server (with the freshly-migrated DB) on port 8866.
+
+- **S1 — `/run` happy path.** Row exists with `created_at_source=
+  'telegram'`, title is first-80-chars, description carries full
+  prompt, bot replied with `✅ task #1 queued · dispatcher pending`.
+- **S2 — `/cancel` happy path.** Status flips to `'cancelled'`,
+  `activities` row `task_cancelled` with `detail.source='telegram'`
+  and `detail.prior_status='pending'`.
+- **S3 — `/approve` via reply-to-msg on `risk_gated`.** Task transitions
+  `awaiting_approval → pending`; `activities` row `task_risk_approved`
+  with `detail.source='telegram'`.
+- **S4 — backward compat.** `/answer` flips `ops_decisions.status`,
+  `/reply` inserts `direction='user_to_agent'`, `/help` returns the
+  usage card (FR23).
+- **S5 — NFR11 malformed `/run`.** Empty, whitespace-only, and 3100-char
+  prompts each return a usage hint; the inbound loop does not crash.
+- **S6 — NFR11 non-integer id.** `/cancel abc` and `/approve xyz` each
+  return a usage hint; no API call.
+
+Plus the NFR5 grep audit: bot token absent from every DB row and from
+the server's full stdout/stderr capture.
+
+24/24 checks pass.
+
+### Operator flow
+
+```bash
+cc restart                            # lifespan runs the new migration
+# In Telegram (operator chat):
+/run draft release notes for v2.4     # → ✅ task #N queued
+/approve 62                           # → ✅ task #62 approved
+/cancel 63                            # → ✅ task #63 cancelled
+# Or, reply to a 🛑 RISK-GATED notification with any text → approves.
+```
+
+### Not in this release (deferred to mvp2-growth / Phase 2)
+
+- **`/status` snapshot** (live sessions, pending decisions, today cost,
+  free slots).
+- **Inline keyboard `[Yes] [No]`** for DECISIONS.
+- **`/snooze <decision_id> <duration>`** wires up
+  `notification_log.snoozed_until`.
+- **`/schedule "<cron>" <prompt>`** creates `ops_schedules` rows from TG.
+- **Reply-to-task-complete starts follow-up `/run`** — Growth feature.
+- Topic-per-task in TG supergroup, inline-button risk approval,
+  voice-memo → STT, multi-operator allowlist, mobile dashboard surface
+  — Phase 3 vision; no commitment.
 
 ---
 

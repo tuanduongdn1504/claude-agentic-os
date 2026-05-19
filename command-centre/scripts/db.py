@@ -385,6 +385,10 @@ def apply_migrations() -> None:
         _migrate_add_column(conn, "skills",    "launch_count",     "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "ops_tasks", "cost_source",      "TEXT NOT NULL DEFAULT 'unknown'")
         _migrate_add_column(conn, "sessions",  "cost_source",      "TEXT NOT NULL DEFAULT 'unknown'")
+        # v0.5.0-mvp2 — trigger-source provenance for "Async hours shifted"
+        # success metric (PRD FR20/21). Orthogonal with cost_source above:
+        # different column, different code path, additive on the same table.
+        _migrate_add_column(conn, "ops_tasks", "created_at_source", "TEXT NOT NULL DEFAULT 'dashboard'")
 
 
 # ---------------------------------------------------------------------------

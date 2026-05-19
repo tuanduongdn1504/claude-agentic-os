@@ -27,6 +27,7 @@ import signal
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -355,9 +356,28 @@ def _outbound_loop() -> None:
 # Inbound — long-poll Telegram, route replies back to the API.
 # ---------------------------------------------------------------------------
 
-# /answer 5 yes proceed
-# /reply 12 acknowledged
-_CMD_RE = re.compile(r"^/(answer|reply)\s+(\d+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+# Slash command grammar (v0.5.0-mvp2):
+#
+#   /answer <decision_id> <body>          → answer a pending decision     (v0.3.0)
+#   /reply  <inbox_id>    <body>          → reply to an inbox message     (v0.3.0)
+#   /approve <task_id>                    → override risk gate            (v0.5.0-mvp2, FR16)
+#   /cancel  <task_id>                    → cancel pending / risk-gated   (v0.5.0-mvp2, FR18)
+#   /run <prompt>                         → POST /api/tasks                (v0.5.0-mvp2, FR1-4)
+#
+# Two patterns because `/run` doesn't take a leading int ID — keeping the
+# verbs in one regex would force a body for every verb. The body group is
+# optional in _CMD_WITH_ID_RE so /approve and /cancel parse without one.
+_CMD_WITH_ID_RE = re.compile(
+    r"^/(answer|reply|approve|cancel)\s+(\d+)(?:\s+(.+))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+_CMD_RUN_RE = re.compile(r"^/run\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+# `/run` prompt cap — amendment says 3000 chars (PRD says 4000 for outbound
+# body truncation, but inbound /run uses the tighter limit to match the
+# 3000-char body cap used by _format_decision / _format_inbox).
+_RUN_PROMPT_MAX = 3000
+_RUN_TITLE_MAX = 80
 
 
 def _route_reply(event_type: str, event_id: str, body: str) -> bool:
@@ -376,15 +396,161 @@ def _route_reply(event_type: str, event_id: str, body: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# /run, /approve, /cancel — v0.5.0-mvp2.
+# ---------------------------------------------------------------------------
+
+def _reply_text(chat_id: Any, message_id: Any, text: str,
+                parse_mode: Optional[str] = "Markdown") -> None:
+    """Send a reply quoting the inbound message. Falls back silently on send
+    failure — the bridge must never crash the inbound long-poll (NFR11)."""
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text[:4000],
+        "reply_to_message_id": message_id,
+    }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        _tg("sendMessage", payload)
+    except Exception as exc:
+        # Retry once without parse_mode in case the Markdown parser tripped
+        # on operator-typed content. Then give up.
+        if parse_mode:
+            try:
+                payload.pop("parse_mode", None)
+                _tg("sendMessage", payload)
+                return
+            except Exception:
+                pass
+        print(f"[telegram] reply send failed: {exc!r}", file=sys.stderr)
+
+
+def _http_status_from_exc(exc: Exception) -> tuple[Optional[int], str]:
+    """Extract (status_code, body) from an HTTPError raised by urllib. Returns
+    (None, str(exc)) if it isn't an HTTPError. Body is truncated to 500 chars."""
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        # FastAPI errors come back as {"detail": "..."} — pull the message
+        # out so the operator sees a usable line, not raw JSON.
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and "detail" in parsed:
+                body = str(parsed["detail"])
+        except Exception:
+            pass
+        return exc.code, body[:500]
+    return None, str(exc)[:500]
+
+
+def _handle_run(chat_id: Any, message_id: Any, prompt: str) -> None:
+    """`/run <prompt>` — POST a new task to /api/tasks with source='telegram'.
+    Validates length; never crashes the loop on malformed input (NFR11)."""
+    prompt = prompt.strip()
+    if not prompt:
+        _reply_text(chat_id, message_id,
+                    "usage: `/run <prompt>` — first 80 chars become the task title.")
+        return
+    if len(prompt) > _RUN_PROMPT_MAX:
+        _reply_text(chat_id, message_id,
+                    f"prompt too long ({len(prompt)} chars) — shorter please, "
+                    f"max {_RUN_PROMPT_MAX} chars.")
+        return
+
+    title = prompt[:_RUN_TITLE_MAX].replace("\n", " ").strip() or "telegram task"
+    try:
+        res = _http_post_json(
+            f"{DASHBOARD_URL}/api/tasks",
+            {"title": title, "description": prompt, "created_at_source": "telegram"},
+        )
+        task_id = res.get("id")
+        if not task_id:
+            _reply_text(chat_id, message_id, f"⚠️ task create returned no id · {res}")
+            return
+        _reply_text(chat_id, message_id,
+                    f"✅ task `#{task_id}` queued · dispatcher pending")
+    except Exception as exc:
+        code, body = _http_status_from_exc(exc)
+        safe_body = _md_safe(body) if body else ""
+        if code:
+            _reply_text(chat_id, message_id, f"⚠️ create failed · {code} · {safe_body}")
+        else:
+            _reply_text(chat_id, message_id, f"⚠️ create failed · {safe_body}")
+
+
+def _handle_approve(chat_id: Any, message_id: Any, task_id: int) -> None:
+    """`/approve <task_id>` — POST /api/tasks/{id}/approve?source=telegram."""
+    try:
+        _http_post_json(
+            f"{DASHBOARD_URL}/api/tasks/{task_id}/approve?source=telegram",
+            {},
+        )
+        _reply_text(chat_id, message_id,
+                    f"✅ task `#{task_id}` approved · dispatcher resuming")
+    except Exception as exc:
+        code, body = _http_status_from_exc(exc)
+        safe_body = _md_safe(body) if body else ""
+        if code == 404:
+            _reply_text(chat_id, message_id, f"task `#{task_id}` not found")
+        elif code in (400, 409):
+            _reply_text(chat_id, message_id,
+                        f"task `#{task_id}` cannot be approved · {safe_body}")
+        elif code is not None:
+            _reply_text(chat_id, message_id,
+                        f"⚠️ approve failed · {code} · {safe_body}")
+        else:
+            _reply_text(chat_id, message_id, f"⚠️ approve failed · {safe_body}")
+
+
+def _handle_cancel(chat_id: Any, message_id: Any, task_id: int) -> None:
+    """`/cancel <task_id>` — POST /api/tasks/{id}/cancel?source=telegram."""
+    try:
+        _http_post_json(
+            f"{DASHBOARD_URL}/api/tasks/{task_id}/cancel?source=telegram",
+            {},
+        )
+        _reply_text(chat_id, message_id, f"✅ task `#{task_id}` cancelled")
+    except Exception as exc:
+        code, body = _http_status_from_exc(exc)
+        safe_body = _md_safe(body) if body else ""
+        if code == 404:
+            _reply_text(chat_id, message_id, f"task `#{task_id}` not found")
+        elif code in (400, 409):
+            _reply_text(chat_id, message_id,
+                        f"task `#{task_id}` cannot be cancelled · {safe_body}")
+        elif code is not None:
+            _reply_text(chat_id, message_id,
+                        f"⚠️ cancel failed · {code} · {safe_body}")
+        else:
+            _reply_text(chat_id, message_id, f"⚠️ cancel failed · {safe_body}")
+
+
 def _handle_message(msg: dict) -> None:
-    """Process a single Telegram message — reply-to or slash-command."""
+    """Process a single Telegram message — reply-to or slash-command.
+
+    Routing order (v0.5.0-mvp2):
+      1. reply-to-message → lookup notification_log
+         - decision  → POST /api/decisions/{id}/answer  (v0.3.0)
+         - inbox     → POST /api/inbox/{id}/reply       (v0.3.0)
+         - risk_gated → /approve <task_id>              (v0.5.0-mvp2, FR17)
+      2. slash command
+         - /answer | /reply  → existing route_reply     (v0.3.0)
+         - /run <prompt>     → _handle_run              (v0.5.0-mvp2, FR1-4)
+         - /approve <id>     → _handle_approve          (v0.5.0-mvp2, FR16)
+         - /cancel <id>      → _handle_cancel           (v0.5.0-mvp2, FR18)
+      3. /help | /start → usage text
+    """
     chat = (msg.get("chat") or {}).get("id")
     if CHAT_ID and str(chat) != CHAT_ID:
-        # Ignore messages from other chats — bot might be in a group.
+        # NFR6 — silently ignore cross-chat traffic.
         return
     text = (msg.get("text") or "").strip()
     if not text:
         return
+    message_id = msg.get("message_id")
 
     # 1. Reply-to-message: look up original.
     reply_to = msg.get("reply_to_message")
@@ -394,50 +560,94 @@ def _handle_message(msg: dict) -> None:
             found = _lookup_by_tg_message(int(orig_id))
             if found:
                 event_type, event_key = found
+                # v0.5.0-mvp2 — reply-to-msg on a 🛑 RISK-GATED notification
+                # routes to /approve. Reply-to-cancel is NOT supported per
+                # amendment (avoid accidental cancels from casual replies).
+                if event_type == "risk_gated":
+                    try:
+                        _handle_approve(chat, message_id, int(event_key))
+                    except (ValueError, TypeError):
+                        _reply_text(chat, message_id,
+                                    f"⚠️ bad task id in notification_log: {event_key!r}")
+                    return
                 try:
                     if _route_reply(event_type, event_key, text):
                         _tg("sendMessage", {
                             "chat_id": chat,
                             "text": f"✅ recorded · {event_type} #{event_key}",
-                            "reply_to_message_id": msg.get("message_id"),
+                            "reply_to_message_id": message_id,
                         })
                         return
                 except Exception as exc:
                     _tg("sendMessage", {
                         "chat_id": chat,
                         "text": f"⚠️ failed to route reply: {exc}",
-                        "reply_to_message_id": msg.get("message_id"),
+                        "reply_to_message_id": message_id,
                     })
                     return
             else:
                 _tg("sendMessage", {
                     "chat_id": chat,
                     "text": "⚠️ couldn't find the original notification — try `/answer <id>` or `/reply <id>`",
-                    "reply_to_message_id": msg.get("message_id"),
+                    "reply_to_message_id": message_id,
                     "parse_mode": "Markdown",
                 })
                 return
 
-    # 2. Slash command escape hatch.
-    m = _CMD_RE.match(text)
-    if m:
-        kind, ref_id, body = m.group(1).lower(), m.group(2), m.group(3)
-        event_type = "decision" if kind == "answer" else "inbox"
+    # 2a. /run <prompt> — free-text remainder, multi-line, no leading ID.
+    m_run = _CMD_RUN_RE.match(text)
+    if m_run:
+        _handle_run(chat, message_id, m_run.group(1))
+        return
+
+    # 2b. /answer | /reply | /approve | /cancel — all share a leading int ID.
+    m_cmd = _CMD_WITH_ID_RE.match(text)
+    if m_cmd:
+        verb = m_cmd.group(1).lower()
         try:
-            if _route_reply(event_type, ref_id, body):
+            ref_id = int(m_cmd.group(2))
+        except (TypeError, ValueError):
+            # Should be unreachable — regex enforces \d+ — but guard NFR11.
+            _reply_text(chat, message_id, "usage: numeric task / event id required")
+            return
+        body = m_cmd.group(3)
+        if verb in ("answer", "reply"):
+            event_type = "decision" if verb == "answer" else "inbox"
+            if not body or not body.strip():
+                _reply_text(chat, message_id,
+                            f"usage: `/{verb} <id> <text>` — body required")
+                return
+            try:
+                if _route_reply(event_type, str(ref_id), body):
+                    _tg("sendMessage", {
+                        "chat_id": chat,
+                        "text": f"✅ recorded · {event_type} #{ref_id}",
+                        "reply_to_message_id": message_id,
+                    })
+                    return
+            except Exception as exc:
                 _tg("sendMessage", {
                     "chat_id": chat,
-                    "text": f"✅ recorded · {event_type} #{ref_id}",
-                    "reply_to_message_id": msg.get("message_id"),
+                    "text": f"⚠️ failed: {exc}",
+                    "reply_to_message_id": message_id,
                 })
                 return
-        except Exception as exc:
-            _tg("sendMessage", {
-                "chat_id": chat,
-                "text": f"⚠️ failed: {exc}",
-                "reply_to_message_id": msg.get("message_id"),
-            })
+        elif verb == "approve":
+            _handle_approve(chat, message_id, ref_id)
             return
+        elif verb == "cancel":
+            _handle_cancel(chat, message_id, ref_id)
+            return
+
+    # 2c. Bare /run, /approve, /cancel without args → usage hint (NFR11).
+    bare = text.lower().split()[0] if text else ""
+    if bare == "/run":
+        _reply_text(chat, message_id,
+                    "usage: `/run <prompt>` — first 80 chars become the task title.")
+        return
+    if bare in ("/approve", "/cancel"):
+        _reply_text(chat, message_id, f"usage: `{bare} <task_id>` — numeric id required.")
+        return
 
     # 3. Help fallthrough.
     if text.lower() in ("/help", "/start", "help"):
@@ -445,10 +655,15 @@ def _handle_message(msg: dict) -> None:
             "chat_id": chat,
             "text": (
                 "Command Centre · Telegram bridge\n\n"
-                "I forward `DECISION:` and `INBOX:` from Claude Code sessions.\n\n"
+                "I forward `DECISION:` and `INBOX:` from Claude Code sessions, "
+                "and let you launch / approve / cancel headless tasks from here.\n\n"
                 "*Reply to a notification* with your answer, or use:\n"
                 "`/answer <id> <text>` — answer a pending decision\n"
-                "`/reply <id> <text>` — reply to an inbox message"
+                "`/reply <id> <text>` — reply to an inbox message\n"
+                "`/run <prompt>` — queue a new headless task\n"
+                "`/approve <task_id>` — override a risk-gated task\n"
+                "`/cancel <task_id>` — cancel a pending / risk-gated task\n\n"
+                "_Reply to a_ 🛑 _RISK-GATED notification with any text to approve._"
             ),
             "parse_mode": "Markdown",
         })

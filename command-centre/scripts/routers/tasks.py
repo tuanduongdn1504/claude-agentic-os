@@ -6,9 +6,10 @@ lands with the Mission Control milestone.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 import db
 
@@ -19,6 +20,14 @@ _ALLOWED_STATUSES = ("pending", "awaiting_approval", "running", "done",
                      "failed", "cancelled")
 _ALLOWED_MODES = ("classic", "stream")
 _ALLOWED_QUADRANTS = ("do", "schedule", "delegate", "archive")
+
+# /cancel accepts these as the prior status; everything else is a no-op or
+# requires emergency-stop. See amendment "Backend delta → /cancel".
+_CANCELLABLE_STATUSES = ("pending", "awaiting_approval")
+# Audit-log source values written into activities.detail JSON. Validator on
+# /approve and /cancel accepts any non-empty string but bridge always
+# sends 'telegram'; dashboard omits the param and lands at 'api'.
+_DEFAULT_AUDIT_SOURCE = "api"
 
 
 @router.get("/api/tasks")
@@ -71,6 +80,18 @@ async def create_task(request: Request) -> dict[str, Any]:
     quadrant = p.get("quadrant")
     if quadrant and quadrant not in _ALLOWED_QUADRANTS:
         raise HTTPException(400, "bad quadrant")
+    # v0.5.0-mvp2 — accept optional provenance marker. Validator: must be a
+    # non-empty string when present. Defaults to 'dashboard' (column default
+    # too). Bridge sends 'telegram'; reserve 'schedule' / 'api' without a
+    # further migration. Existing dashboard POSTs that omit the field
+    # remain unchanged (FR24).
+    cas_raw = p.get("created_at_source")
+    if cas_raw is None:
+        created_at_source = "dashboard"
+    else:
+        if not isinstance(cas_raw, str) or not cas_raw.strip():
+            raise HTTPException(400, "created_at_source must be a non-empty string")
+        created_at_source = cas_raw.strip()
 
     fields = {
         "title": title,
@@ -87,6 +108,8 @@ async def create_task(request: Request) -> dict[str, Any]:
         "quadrant": quadrant,
         # v0.6.0 — every dispatcher-bound task is api_pool spend.
         "cost_source": "api_pool",
+        # v0.5.0-mvp2 — trigger provenance (PRD FR20).
+        "created_at_source": created_at_source,
     }
     keys = ", ".join(fields.keys())
     marks = ", ".join(f":{k}" for k in fields)
@@ -133,20 +156,74 @@ async def delete_task(task_id: int) -> dict[str, Any]:
 
 
 @router.post("/api/tasks/{task_id}/approve")
-async def approve_task(task_id: int) -> dict[str, Any]:
+async def approve_task(
+    task_id: int,
+    source: str = Query(_DEFAULT_AUDIT_SOURCE, max_length=64),
+) -> dict[str, Any]:
+    """Flip a risk-gated task from awaiting_approval → pending.
+
+    v0.5.0-mvp2: accept `?source=` for audit provenance and insert an
+    `activities` row tagged `event_type='task_risk_approved'` so every
+    risk-gate override is forensically reconstructable (FR19). Default
+    source='api' covers existing dashboard callers without code change.
+    """
+    src = (source or _DEFAULT_AUDIT_SOURCE).strip() or _DEFAULT_AUDIT_SOURCE
     with db.connect() as conn:
         row = conn.execute(
             "SELECT status FROM ops_tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not row:
             raise HTTPException(404, "task not found")
-        if row["status"] != "awaiting_approval":
-            raise HTTPException(409, f"task status is {row['status']}, not awaiting_approval")
+        prior_status = row["status"]
+        if prior_status != "awaiting_approval":
+            raise HTTPException(409, f"task status is {prior_status}, not awaiting_approval")
         conn.execute(
             "UPDATE ops_tasks SET status='pending', approved_at=datetime('now') WHERE id = ?",
             (task_id,),
         )
-    return {"approved": True}
+        conn.execute(
+            "INSERT INTO activities(event_type, detail) VALUES ('task_risk_approved', ?)",
+            (json.dumps({"task_id": task_id, "prior_status": prior_status, "source": src}),),
+        )
+    return {"approved": True, "task_id": task_id, "source": src}
+
+
+@router.post("/api/tasks/{task_id}/cancel")
+async def cancel_task(
+    task_id: int,
+    source: str = Query(_DEFAULT_AUDIT_SOURCE, max_length=64),
+) -> dict[str, Any]:
+    """Cancel a pending or risk-gated task.
+
+    v0.5.0-mvp2 (FR18). Mirrors /approve. Reject (400) from running,
+    done, failed, cancelled — running tasks must use
+    `/api/system/emergency-stop`; terminal states are no-ops. Inserts
+    an `activities` row tagged `event_type='task_cancelled'` for audit.
+    """
+    src = (source or _DEFAULT_AUDIT_SOURCE).strip() or _DEFAULT_AUDIT_SOURCE
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT status FROM ops_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "task not found")
+        prior_status = row["status"]
+        if prior_status not in _CANCELLABLE_STATUSES:
+            if prior_status == "running":
+                msg = "running tasks must use /api/system/emergency-stop"
+            else:
+                msg = f"task already terminal (status='{prior_status}')"
+            raise HTTPException(400, msg)
+        conn.execute(
+            "UPDATE ops_tasks SET status='cancelled', completed_at=datetime('now') "
+            "WHERE id = ?",
+            (task_id,),
+        )
+        conn.execute(
+            "INSERT INTO activities(event_type, detail) VALUES ('task_cancelled', ?)",
+            (json.dumps({"task_id": task_id, "prior_status": prior_status, "source": src}),),
+        )
+    return {"cancelled": True, "task_id": task_id, "prior_status": prior_status, "source": src}
 
 
 @router.post("/api/tasks/{task_id}/rerun")
