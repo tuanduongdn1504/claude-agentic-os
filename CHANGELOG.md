@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.6.2 — DRAFT spec: Telegram `/snooze <decision_id> [duration]`
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.2-amendment.md`,
+applied on top of current `main` HEAD (post v0.6.1).
+
+Second Phase 2 feature from the Telegram Remote Trigger PRD. Bridge-
+only — single file change to `telegram_bridge.py` plus this CHANGELOG
+entry. No schema changes (column `notification_log.snoozed_until`
+already exists, has been unused since v0.3.0), no new endpoints, no
+breaking changes.
+
+Numbered `v0.6.2` (patch over v0.6.1) — even tighter scope, same
+subsystem.
+
+### Why this release
+
+A decision pings, operator can't answer now (meeting, call, asleep),
+outbound tick re-fires every 30s. Today: answer half-mind or mute the
+whole chat. `/snooze 42 30m` says "remind me in 30 min" — notification
+suppressed during the window, re-fires once after elapse, then default
+dedupe resumes.
+
+The wire was designed in v0.3.0 (`snoozed_until` column + intent noted
+in original CHANGELOG) but never built. This release finishes that
+work.
+
+### What's planned
+
+- **`/snooze <decision_id> [duration]`** slash command. Extends
+  `_CMD_WITH_ID_RE` from `(answer|reply|approve|cancel)` to add
+  `snooze`. Duration optional, defaults to `30m`; format `Nm|Nh|Nd`;
+  capped at 24h.
+- **`_handle_snooze`** — parse duration, look up notification_log row,
+  UPDATE `snoozed_until`, audit-log to `activities` with
+  `source='telegram'` (FR19 pattern), reply with wake-time confirmation.
+- **Fix `_already_notified`** to respect `snoozed_until`. Currently
+  blocks unconditionally when a row exists; after fix, returns False
+  when `snoozed_until <= now()` so the outbound tick re-fires once.
+- **Fix `_record_notify`** to clear `snoozed_until` back to NULL after
+  a re-fire, so dedupe reverts to default permanent-block.
+- **Reply-to-msg snooze** — reply to a decision notification with
+  `/snooze 30m` (no ID); `_lookup_by_tg_message` resolves the
+  decision_id. Mirrors mvp2's reply-to-RISK-GATED → approve pattern.
+- **Scope: decisions only.** Inbox / task-complete / risk-gated snooze
+  deferred — different UX shapes, defer until usage signals demand.
+
+### Schema delta
+
+None. `notification_log.snoozed_until` exists since v0.3.0; this
+release wires it up.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: ~1h. Smallest Phase 2 win in the corpus — most of the
+plumbing (column, dedupe loop, audit table) already exists.
+
+---
+
 ## v0.6.1 — Telegram `/status` snapshot
 
 Built against the amendment in
