@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.6.1 — DRAFT spec: Telegram `/status` snapshot
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.1-amendment.md`,
+applied on top of current `main` HEAD (post v0.5.0-mvp2).
+
+Phase 2 feature from the Telegram Remote Trigger PRD
+(`command-centre/docs/prd-telegram-remote.md`). Bridge-only — single
+file change to `telegram_bridge.py` plus this CHANGELOG entry. No
+schema changes, no new endpoints, no breaking changes.
+
+Numbered `v0.6.1` (patch-level over v0.6.0) — small additive feature
+confined to the Telegram bridge subsystem. Alternative `v0.7.0` would
+be more semver-correct for a new feature but increments the minor
+faster than the rhythm of this codebase warrants.
+
+### Why this release
+
+mvp1 + mvp2 shipped the read/write Telegram loop. The remaining gap is
+**passive awareness**: between active operations, the operator's most
+common question is "What's my agent doing right now?" — and today the
+answer requires opening the dashboard. `/status` collapses the
+KpiRow + DispatcherStrip + AttentionBar + live sessions view into a
+single Telegram reply.
+
+This is the first feature in the corpus designed for glanceable
+telemetry, not active control. Expected use pattern is multiple times
+per day — morning check, lunch break, post-meeting, before bed.
+
+### What's planned
+
+- **`/status` slash command** in `telegram_bridge.py`. New regex
+  `_CMD_STATUS_RE` (no args, whole-message match). New routing branch
+  in `_handle_message`.
+- **`_handle_status(chat_id)`** — fetches 5 read-only GET endpoints
+  (`/api/system/dispatcher`, `/api/decisions`, `/api/sessions/live`,
+  `/api/tasks`, `/api/system/state`), per-call try/except, formats via
+  `_format_status`. Total round-trip <1s for a single operator's local
+  install.
+- **`_format_status(...)`** — multi-line Markdown V1 message.
+  Mobile-readable (390 px width, no horizontal scroll). Steady state
+  ~4-6 lines. Conditional alerts (emergency stop, cost cap,
+  back-pressure) appended only when active to keep the message tight.
+- **No audit-log row** — deliberately. `/status` is read-only, not a
+  state-changing operator action. Departs from mvp2's
+  audit-everything-from-Telegram pattern for state-changers.
+- **Partial-failure resilience** — failed endpoints show `?` for their
+  metric, footer line `_some metrics unavailable — see logs_`. Total
+  server failure shows a clear "dashboard down?" message with
+  `cc status` / `cc restart` hints.
+
+### Schema delta
+
+None. Read-only feature, all data sourced from existing endpoints.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: 1-2h. Lower than mvp2 (3-4h) because scope is intentionally
+narrow — single file, no schema, no new endpoints.
+
+---
+
 ## v0.6.0 — SkillLauncher + cost-source disambiguation
 
 Built against the amendment in
