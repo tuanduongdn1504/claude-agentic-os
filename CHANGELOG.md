@@ -145,6 +145,74 @@ from v0.2.0:
 
 ---
 
+## v0.5.0-mvp2 — DRAFT spec: Telegram bridge inbound `/run`, `/approve`, `/cancel`
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.5.0-mvp2-amendment.md`,
+applied on top of current `main` HEAD (post-v0.6.0 merge).
+
+mvp2 of the Telegram Remote Trigger PRD
+(`command-centre/docs/prd-telegram-remote.md`). Closes Journey 4 —
+operator's inbound counterpart to mvp1's outbound `task_complete` +
+`risk_gated` push. Numbered `v0.5.0-mvp2` per PRD's "MVP commit 1 of 2"
+framing; lands chronologically after v0.6.0 (version-history zigzag
+accepted).
+
+### Why this release
+
+mvp1 closed the outbound feedback loop. mvp2 closes inbound: operator
+can launch tasks (`/run <prompt>`), approve risk-gated tasks
+(`/approve <id>`), and cancel pending tasks (`/cancel <id>`) entirely
+from Telegram. Without mvp2, Journey 4 (late-night risk-gate intercept)
+has no phone-side recovery — operator must walk to the desk and open
+the dashboard.
+
+### What's planned
+
+- **Inbound `/run`, `/approve`, `/cancel` parsers** in
+  `telegram_bridge.py`. Splits the existing `_CMD_RE` into two patterns:
+  with-ID for `(answer|reply|approve|cancel)`, no-ID free-text for
+  `/run`. Three new handler functions; reuses `_md_safe` from mvp1.
+- **New endpoint `POST /api/tasks/{id}/cancel`** mirroring the
+  existing `/approve` pattern at `tasks.py:132`. Audit-log row to
+  `activities` tagged `source='telegram'` on success.
+- **`POST /api/tasks`** body extended with optional `created_at_source`
+  field (default `'dashboard'`). Non-breaking — existing dashboard
+  POSTs continue to work.
+- **`POST /api/tasks/{id}/approve`** extended with `?source=` query
+  param + audit-log row insert (FR19). Adds the activities INSERT if
+  not already present.
+- **`_lookup_by_tg_message` extension** — reply-to-msg on 🛑 RISK-GATED
+  notifications routes to `/approve` (FR17). Reply-to-cancel NOT
+  supported — explicit `/cancel <id>` only to avoid accidental cancels.
+- **`created_at_source` column** on `ops_tasks` for the "Async hours
+  shifted" success metric. Orthogonal with v0.6.0's `cost_source` —
+  different column, different code paths.
+
+### Schema delta
+
+One column, orthogonal with v0.6.0's `cost_source` migration:
+
+| Table | Column | Type | Default |
+|---|---|---|---|
+| `ops_tasks` | `created_at_source` | TEXT NOT NULL | `'dashboard'` |
+
+Idempotent. Order-independent with v0.6.0 (both additive `TEXT NOT NULL
+DEFAULT` columns on `ops_tasks`).
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: 3-4h per PRD (revised from earlier 1-2h — `/cancel` endpoint
+must be added from scratch). PRD's `/api/tasks/{id}/approve` already
+exists (`tasks.py:132`); status enum already includes `'cancelled'`.
+
+---
+
 ## v0.5.0-mvp1 — Telegram bridge: outbound task_complete + risk_gated push
 
 MVP commit 1 of 2 per the Resource Risk mitigation in the Telegram Remote
