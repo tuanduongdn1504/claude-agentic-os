@@ -389,6 +389,15 @@ def apply_migrations() -> None:
         # success metric (PRD FR20/21). Orthogonal with cost_source above:
         # different column, different code path, additive on the same table.
         _migrate_add_column(conn, "ops_tasks", "created_at_source", "TEXT NOT NULL DEFAULT 'dashboard'")
+        # v0.6.3 — multi-account tagging. Sessions stamped via entrypoint proxy
+        # or SessionStart hook hint (see helpers/accounts.py). Orthogonal with
+        # cost_source / created_at_source — different column, additive on same
+        # table.
+        _migrate_add_column(conn, "sessions", "account_id", "TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_account "
+            "ON sessions(account_id)"
+        )
 
 
 # ---------------------------------------------------------------------------

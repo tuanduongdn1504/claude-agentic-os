@@ -1,57 +1,73 @@
 # Changelog
 
-## v0.6.3 — DRAFT spec: multi-account port + FSEvents opt-in + wip cleanup
+## v0.6.3 — multi-account port + FSEvents opt-in + wip cleanup
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.3-amendment.md`,
-applied on top of current `main` HEAD (post v0.6.2).
-
-Clean-up release. Three wip commits (`c877468`, `9e51c76`, `b1f5650`)
-landed on main between the v0.6.1 spec and the v0.6.1 ship without
-CHANGELOG mention, leaving two surfaces in a half-shipped state:
-multi-account UI without a backend (`AccountBreakdownCard` renders an
-empty state), and FSEvents watcher as the default code path in
-`server.py` despite being reverted in the operator's installed copy.
-v0.6.3 ports the multi-account backend across, gates FSEvents behind
-`CC_USE_FSEVENTS=1`, and writes a single backfill CHANGELOG entry
-labelling all four wip-derived bits with their actual status.
+applied on top of current `main` HEAD (post v0.6.2). Clean-up release —
+not new feature work. Three wip commits (`c877468`, `9e51c76`,
+`b1f5650`) landed on main between the v0.6.1 spec and the v0.6.1 ship
+without CHANGELOG mention. This release labels them, completes the
+half-shipped pieces (multi-account UI was rendering an empty state
+because the backend never made the round-trip from the install), and
+gates the experimental watcher behind opt-in.
 
 Numbered `v0.6.3` (patch over v0.6.2) — consistent with v0.6.1 /
-v0.6.2 patch-cadence. Alternative `v0.7.0` is defensible (multi-
-account end-to-end is a real feature ship); the installed copy's
-`db.py` actually labels the migration "v0.7.0 — multi-account
-tagging." Override at build time if minor-bump semantics preferred.
+v0.6.2 patch-cadence. Alternative `v0.7.0` was defensible (multi-
+account is a real feature surfacing for the first time end-to-end) and
+the installed copy's `db.py` actually labels the migration "v0.7.0 —
+multi-account tagging"; chose `v0.6.3` because the work that USED to
+be v0.7.0 is finishing rather than starting fresh.
 
-### Why this release
+### What ships
 
-Main currently has a UI card that renders empty (multi-account
-backend never ported from the install) and an experimental file
-watcher running by default (reverted in the install but still active
-in the repo). Both are silent landmines for anyone rebuilding from a
-fresh checkout. This release closes both.
+- **GMT+7 finish (`c877468`) — production.** Already-clean threading
+  of `fmtDateTimeUTC7` / `fmtTimeUTC7` through `AttentionBar`,
+  `DecisionsCard`, `InboxCard`, `LiveSessionsCard`, `SchedulesCard`,
+  `SkillsRegistry`, `SystemHealthStrip`, `DecisionsPage`. Continuation
+  of `a505d24`. Already shipped in `main` — labelled here for the
+  full wip-cleanup attribution.
+- **Per-event daily token attribution (part of `9e51c76`) —
+  production.** Sessions that span midnight now split tokens across
+  calendar days correctly via per-event `daily_usage` keyed by
+  `(date, model, source)`. Already shipped in `main` — labelled here.
+- **Multi-account backend port (NEW IN v0.6.3) — completes the UI
+  half from `9e51c76`.** Adds `scripts/helpers/accounts.py` (106-line
+  verbatim port from install: hook-hint > entrypoint-proxy resolver,
+  `lru_cache`-backed config reload, `label_for` / `all_account_ids` /
+  `reload_config` public symbols) and
+  `scripts/hooks/session_start_account_snapshot.py` (91-line
+  verbatim port; stdlib only; never blocks session start; stderr-only
+  logging). Adds `sessions.account_id` TEXT column + idempotent
+  `idx_sessions_account` index via `_migrate_add_column`, additive
+  next to v0.6.0's `cost_source` and v0.5.0-mvp2's `created_at_source`
+  (three additive columns coexist on the same table). `sync_sessions.py`
+  stamps `account_id` per row right after the existing
+  `_derive_cost_source` call, using the hook-hint > entrypoint-proxy
+  chain — safe when no `accounts.json` is configured because the
+  helper returns the configured `fallback` (default `"unknown"`).
+  `server.py`'s `/api/summary` gains the `by_account` block (one row
+  per account today + a `setdefault` pass to surface every configured
+  account even at zero usage). Pre-shipped UI in
+  `AccountBreakdownCard.tsx` now renders real rows instead of the
+  empty state.
+- **FSEvents opt-in (NEW IN v0.6.3) — `CC_USE_FSEVENTS=1` gate.**
+  Wraps the `watchdog` import in an env-gate; restores the proven
+  120-second polling loop as the unconditional default branch (the
+  spec called this the "pre-experiment polling path"). Matches the
+  install copy's already-reverted-to-polling behaviour. `watchdog`
+  stays in `requirements.txt` with an inline comment marking it
+  optional so the single-file install path keeps working — the gate
+  ensures the experimental code isn't exercised unless explicitly
+  opted in. Includes graceful degradation: if an operator sets
+  `CC_USE_FSEVENTS=1` without `watchdog` installed, the server logs
+  the missing import once and falls back to the polling loop instead
+  of crashing.
 
-### What's planned
+### What didn't ship
 
-- **Multi-account backend port.** New `scripts/helpers/accounts.py`
-  + `scripts/hooks/session_start_account_snapshot.py` from the
-  install. New `sessions.account_id` column + index via
-  `_migrate_add_column`. `sync_sessions.py` stamping. `server.py`
-  `/api/summary by_account` block. `AccountBreakdownCard` (already
-  in main from `9e51c76`) starts rendering real data.
-- **FSEvents env-gate.** `CC_USE_FSEVENTS` env var (default off)
-  controls the experimental watchdog-based JSONL watcher. Default
-  reverts to the proven 120s polling loop — matches install behaviour.
-  `watchdog` stays in `requirements.txt` so the single-file install
-  path keeps working, but the env-gate ensures the experimental code
-  is not exercised unless explicitly opted in.
-- **Operator docs.** `data/accounts.json.example` template, README
-  subsection on multi-account setup (hook registration in
-  `~/.claude/settings.json`), `.env.example` line for
-  `CC_USE_FSEVENTS`.
-- **Retroactive labels for two already-clean wip bits.** GMT+7 finish
-  (`c877468`) and per-event daily token attribution fix (part of
-  `9e51c76`) shipped clean in main; the CHANGELOG entry calls them
-  out so the wip-cleanup pile has full attribution.
+(Nothing — all four wip-derived bits now have explicit handling. No
+deferrals.)
 
 ### Schema delta
 
@@ -63,17 +79,91 @@ v0.5.0-mvp2's `created_at_source`:
 | `sessions` | `account_id` | TEXT | NULL |
 
 Plus `CREATE INDEX IF NOT EXISTS idx_sessions_account ON
-sessions(account_id)`. Both idempotent.
+sessions(account_id)`. Both idempotent — running `apply_migrations()`
+three times in succession is a no-op after the first.
 
-### Status
+### Verified
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+All 8 stop conditions from the amendment pass against a tempdir
+`CC_INSTALL_DIR`:
 
-Estimate: ~1-2h. Port ~30 min, FSEvents gate ~15 min, smoke tests
-~30 min, CHANGELOG flip ~10 min.
+- **S1 — migration idempotent.** `apply_migrations()` 3× in a row;
+  `sessions.account_id` + `idx_sessions_account` present once.
+- **S2 — `/api/summary.by_account` shape.** No-config → single
+  `unknown` row with today's session totals. Valid `accounts.json`
+  with personal + work → both keys present, work surfaces at zero
+  usage via the `setdefault` path, labels mapped via `label_for`.
+  Direct HTTP via `TestClient(server.app)` returns the exact dict
+  shape `AccountBreakdownCard` consumes (`{label, sessions, tokens,
+  cost_usd}` per account).
+- **S3 — `AccountBreakdownCard` renders.** UI type contract
+  (`AccountSummaryRow` in `types.ts`) matches server response 1:1;
+  no UI code change required.
+- **S4 — hook smoke.** `session_start_account_snapshot.py` writes
+  `data/account-hints/<sid>.json` with full record (session_id +
+  account_uuid + email + organization_uuid + display_name +
+  captured_at) within 1s of receiving stdin JSON. Malformed
+  `~/.claude.json` does NOT block — hook still exits 0, logs the
+  failure to stderr, and writes a hint with `account_uuid=None`.
+- **S5 — FSEvents opt-out default.** `CC_USE_FSEVENTS` unset →
+  `server.USE_FSEVENTS=False`; sync loop log reads
+  `using 120s polling loop`. No `Observer` instantiated.
+- **S6 — FSEvents opt-in.** `CC_USE_FSEVENTS=1` + `watchdog`
+  installed → `server.USE_FSEVENTS=True`; sync loop log reads
+  `[sync_loop] FSEvents watching ~/.claude/projects`. With env set
+  but `watchdog` missing, server logs the ImportError once and
+  degrades to the polling loop instead of crashing.
+- **S7 — backward compat (no config + no env).** Helper returns
+  `"unknown"` fallback; `all_account_ids() == []`; sessions with no
+  `account_id` surface as the single `unknown` row in `by_account`.
+  All v0.6.2 features (Telegram `/run`, `/status`, `/snooze`)
+  untouched.
+- **S8 — idempotent on re-install.** Schema + helpers + hook land in
+  place; running `sync_sessions.run_sync()` twice in succession on a
+  seeded JSONL leaves `account_id='work'` for the test entrypoint
+  (`claude-desktop`) without re-querying or drift.
+
+### Operator flow
+
+```bash
+cc restart           # picks up the schema migration in lifespan.
+cc doctor            # no new checks; existing ones pass.
+cc sync              # backfills account_id on existing sessions
+                     # (via entrypoint proxy — hook hints only appear
+                     # for sessions started AFTER hook registration).
+```
+
+For multi-account specifically:
+
+```bash
+# 1. Edit ~/.command-centre/data/accounts.json from the .example.
+# 2. Add the SessionStart hook to ~/.claude/settings.json (README has
+#    the snippet).
+# 3. Restart Claude Code so the hook fires for new sessions.
+# 4. Wait one sync cycle. The Account split card populates.
+```
+
+For FSEvents (optional):
+
+```bash
+echo "CC_USE_FSEVENTS=1" >> ~/.command-centre/.env
+cc restart
+# Verify in logs: "[sync_loop] FSEvents watching ~/.claude/projects"
+```
+
+### Not in this release
+
+- **Auto-registering the SessionStart hook** in `~/.claude/settings.json`.
+  Operator-configured. Install.sh could prompt interactively, but
+  operators who don't want multi-account shouldn't be hassled. README
+  documents the manual step.
+- **`cc doctor` checks for multi-account / FSEvents config** —
+  defaults are zero-config so the doctor has nothing useful to say.
+  Add when an operator actually trips on a misconfiguration.
+- **Backfill on existing closed sessions** beyond the
+  entrypoint-proxy path. Hook hints only apply to sessions that
+  started after hook registration. Acceptable — `cc sync` re-runs
+  the proxy on every cycle.
 
 ---
 

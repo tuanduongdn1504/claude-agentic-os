@@ -61,6 +61,62 @@ cc trigger     # poke the dispatcher manually
 cc logs        # tail server + mission-control logs
 ```
 
+### Multi-account setup (optional)
+
+If you log into Claude Code under more than one OAuth account on the same
+machine (e.g. work on Desktop, personal on VS Code), `/api/summary` splits
+today's spend per account on the dashboard's **Account split** card.
+
+1. Copy the template and edit the entrypoints / UUIDs for your accounts:
+
+   ```bash
+   cp ~/.command-centre/data/accounts.json.example ~/.command-centre/data/accounts.json
+   $EDITOR ~/.command-centre/data/accounts.json
+   ```
+
+   The entrypoint proxy (`claude-code`, `claude-desktop`, `vscode`) works
+   retroactively against existing sessions. UUIDs are filled in by the
+   optional `SessionStart` hook below and are authoritative when present.
+
+2. *(Optional, recommended for accuracy)* register the SessionStart hook
+   so new sessions snapshot their OAuth account UUID into
+   `~/.command-centre/data/account-hints/<sid>.json`:
+
+   ```json
+   {
+     "hooks": {
+       "SessionStart": [
+         {
+           "matcher": "*",
+           "command": "/Users/<you>/.command-centre/scripts/hooks/session_start_account_snapshot.py"
+         }
+       ]
+     }
+   }
+   ```
+
+   Add this to `~/.claude/settings.json`, then restart Claude Code so the
+   hook fires for new sessions.
+
+3. Backfill `account_id` on existing rows and reload the dashboard:
+
+   ```bash
+   cc sync
+   ```
+
+   The card populates within one sync cycle.
+
+Skip this entirely and the dashboard still works — sessions surface under
+a single `unknown` row.
+
+### Sync lag (experimental)
+
+By default the server polls `~/.claude/projects/*.jsonl` every 120
+seconds. Setting `CC_USE_FSEVENTS=1` in `~/.command-centre/.env` switches
+to a `watchdog`-backed FSEvents observer that fires within ~2 seconds of
+a JSONL write. The polling loop is the proven, zero-dep path; FSEvents is
+opt-in until it has accumulated more soak time.
+
 ## Repo layout
 
 ```

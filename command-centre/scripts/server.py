@@ -26,27 +26,37 @@ import db  # noqa: E402
 import sync_sessions  # noqa: E402
 import sync_cowork  # noqa: E402
 import sync_skills  # noqa: E402
+from helpers import accounts as accounts_helper  # noqa: E402
 
 from routers import (  # noqa: E402
     context, firehose, hitl, mcp, observability, schedules, sessions, skills, system, tasks,
 )
 
-FALLBACK_POLL_SECONDS = 300  # 5-min safety net for missed FSEvents (sleep/wake)
+SYNC_INTERVAL_SECONDS = 120  # default polling cadence
+FALLBACK_POLL_SECONDS = 300  # FSEvents-mode safety net for missed events (sleep/wake)
 
 # ---------------------------------------------------------------------------
-# FSEvents watcher (watchdog)
+# FSEvents watcher (watchdog) — opt-in via CC_USE_FSEVENTS=1.
+# Default is the proven 120s polling loop; FSEvents is experimental and
+# requires `pip install watchdog>=4.0`.
 # ---------------------------------------------------------------------------
 
-try:
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler
-    _WATCHDOG_AVAILABLE = True
-except ImportError:
-    _WATCHDOG_AVAILABLE = False
-    print("[server] watchdog not installed — falling back to polling", file=sys.stderr)
+USE_FSEVENTS = os.environ.get("CC_USE_FSEVENTS", "").lower() in ("1", "true", "yes")
+
+if USE_FSEVENTS:
+    try:
+        from watchdog.observers import Observer
+        from watchdog.events import FileSystemEventHandler
+    except ImportError as exc:
+        print(
+            f"[server] CC_USE_FSEVENTS=1 but watchdog not installed ({exc!r}) — "
+            f"using {SYNC_INTERVAL_SECONDS}s polling loop",
+            file=sys.stderr,
+        )
+        USE_FSEVENTS = False
 
 
-if _WATCHDOG_AVAILABLE:
+if USE_FSEVENTS:
     class _JsonlWatcher(FileSystemEventHandler):
         """Debounced FSEvents handler: triggers an async sync within ~2 s of any
         .jsonl write. Claude writes JSONL line-by-line so a single LLM response
@@ -110,15 +120,17 @@ async def lifespan(app: FastAPI):
 
 async def _sync_loop(app: FastAPI, stop: asyncio.Event) -> None:
     await _run_sync(app)  # initial sync on startup
-    if _WATCHDOG_AVAILABLE:
+    if USE_FSEVENTS:
         await _sync_loop_fsevents(app, stop)
     else:
+        print(f"[sync_loop] using {SYNC_INTERVAL_SECONDS}s polling loop", file=sys.stderr)
         await _sync_loop_poll(app, stop)
 
 
 async def _sync_loop_fsevents(app: FastAPI, stop: asyncio.Event) -> None:
     """FSEvents-driven sync: fires within ~2 s of a .jsonl write.
-    Falls back to a 5-min poll as a safety net after sleep/wake."""
+    Falls back to a 5-min poll as a safety net after sleep/wake.
+    Opt-in via CC_USE_FSEVENTS=1; experimental code path."""
     loop = asyncio.get_running_loop()
     trigger = asyncio.Event()
 
@@ -147,10 +159,11 @@ async def _sync_loop_fsevents(app: FastAPI, stop: asyncio.Event) -> None:
 
 
 async def _sync_loop_poll(app: FastAPI, stop: asyncio.Event) -> None:
-    """Legacy polling fallback (used only if watchdog unavailable)."""
+    """Default 120s polling loop. Proven, zero-dep, runs unless
+    CC_USE_FSEVENTS=1 opts in to the experimental watchdog path."""
     while not stop.is_set():
         try:
-            await asyncio.wait_for(stop.wait(), timeout=FALLBACK_POLL_SECONDS)
+            await asyncio.wait_for(stop.wait(), timeout=SYNC_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
         if stop.is_set():
@@ -230,15 +243,44 @@ async def summary() -> dict[str, Any]:
             GROUP BY COALESCE(cost_source, 'unknown')
             """
         ).fetchall()
+        # v0.6.3 — split today's spend by account (Desktop vs VS Code).
+        acc_rows = conn.execute(
+            """
+            SELECT COALESCE(account_id, 'unknown') AS account_id,
+                   COUNT(*) AS sessions,
+                   COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens,
+                   COALESCE(SUM(cost_usd), 0) AS cost
+            FROM sessions
+            WHERE DATE(COALESCE(ended_at, started_at), 'localtime') = DATE('now', 'localtime')
+              AND (model IS NULL OR model NOT LIKE '<%')
+            GROUP BY COALESCE(account_id, 'unknown')
+            """
+        ).fetchall()
     cost_by_source = {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0}
     for r in cbs_rows:
         cost_by_source[r["src"]] = round(float(r["cost"] or 0.0), 6)
+    by_account: dict[str, dict[str, Any]] = {}
+    for r in acc_rows:
+        aid = r["account_id"]
+        by_account[aid] = {
+            "label": accounts_helper.label_for(aid),
+            "sessions": int(r["sessions"] or 0),
+            "tokens": int(r["tokens"] or 0),
+            "cost_usd": round(float(r["cost"] or 0.0), 6),
+        }
+    # Ensure every configured account appears even if zero usage today.
+    for aid in accounts_helper.all_account_ids():
+        by_account.setdefault(aid, {
+            "label": accounts_helper.label_for(aid),
+            "sessions": 0, "tokens": 0, "cost_usd": 0.0,
+        })
     return {
         "sessions_today": row["sessions_today"],
         "effective_tokens_today": row["effective_tokens_today"],
         "errors_today": row["errors_today"],
         "cost_usd_today": row["cost_usd_today"],
         "cost_by_source": cost_by_source,
+        "by_account": by_account,
         "tools_today": tools["tools_today"],
     }
 

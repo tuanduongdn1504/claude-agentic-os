@@ -1,0 +1,15 @@
+{
+  "fallback": "unknown",
+  "accounts": {
+    "personal": {
+      "label": "Personal",
+      "entrypoints": ["claude-code", "vscode"],
+      "uuids": ["00000000-0000-0000-0000-000000000000"]
+    },
+    "work": {
+      "label": "Work",
+      "entrypoints": ["claude-desktop"],
+      "uuids": ["11111111-1111-1111-1111-111111111111"]
+    }
+  }
+}

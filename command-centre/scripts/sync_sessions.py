@@ -27,6 +27,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import db  # noqa: E402
+from helpers import accounts as accounts_helper  # noqa: E402
 
 CLAUDE_PROJECTS = Path(os.environ.get("CC_CLAUDE_PROJECTS_DIR") or
                        os.path.expanduser("~/.claude/projects"))
@@ -407,6 +408,19 @@ def _upsert_session(conn: sqlite3.Connection, agg: SessionAgg, ended_at: str | N
         )
 
     _derive_cost_source(conn, agg.session_id)
+
+    # v0.6.3 — stamp account_id via SessionStart-hook hint > entrypoint proxy.
+    # accounts_helper returns the configured `fallback` (default 'unknown')
+    # when no rule matches, so this UPDATE is safe with no accounts.json.
+    aid = accounts_helper.account_id_for(
+        entrypoint=_scalar(agg.entrypoint),
+        session_id=agg.session_id,
+    )
+    if aid:
+        conn.execute(
+            "UPDATE sessions SET account_id = ? WHERE session_id = ?",
+            (aid, agg.session_id),
+        )
 
     conn.execute("DELETE FROM tool_calls WHERE session_id = ?", (agg.session_id,))
     if agg.tool_calls:

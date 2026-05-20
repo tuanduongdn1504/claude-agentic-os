@@ -28,8 +28,10 @@ dist/
 test-results/
 playwright-report/
 
-# Runtime data + logs (NEVER commit these — local SQLite has session content)
-command-centre/data/
+# Runtime data + logs (NEVER commit these — local SQLite has session content).
+# Ignore directory contents but keep the directory + tracked templates visible.
+command-centre/data/*
+!command-centre/data/accounts.json.example
 command-centre/logs/
 command-centre/.tmp/
 command-centre/.cc-server.pid
