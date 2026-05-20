@@ -1,4 +1,4 @@
-import { Outlet } from '@tanstack/react-router';
+import { Outlet, useSearch } from '@tanstack/react-router';
 import { Command, Hash } from 'lucide-react';
 import { CommandPalette } from './CommandPalette';
 import { Nav } from './Nav';
@@ -9,8 +9,25 @@ import { EmergencyStopBanner } from '@/components/panels/EmergencyStopBanner';
 
 export function AppShell() {
   const { data: health } = useSystemHealth();
+  // v0.6.6: Obsidian embed mode strips dashboard chrome so the operator
+  // sees only the data view inside the web-viewer iframe. Nav + Header +
+  // EmergencyStopBanner + CommandPalette hidden; AttentionBar (rendered
+  // inside pages) survives.
+  const search = useSearch({ from: '__root__' });
+  const isEmbedded = search.embed === '1' || search.embed === 'true';
+
+  if (isEmbedded) {
+    return (
+      <div className="app-shell embedded min-h-screen flex flex-col">
+        <main className="main embedded flex-1 w-full">
+          <Outlet />
+        </main>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="app-shell min-h-screen flex flex-col">
       <header className="sticky top-0 z-30 backdrop-blur-xl bg-bg/70 border-b border-border">
         <div className="max-w-[1280px] mx-auto px-6 h-14 flex items-center gap-6">
           <div className="flex items-center gap-2.5">
@@ -44,7 +61,7 @@ export function AppShell() {
           </div>
         </div>
       </header>
-      <main className="flex-1 max-w-[1280px] w-full mx-auto px-6 py-8 space-y-6">
+      <main className="main flex-1 max-w-[1280px] w-full mx-auto px-6 py-8 space-y-6">
         <EmergencyStopBanner />
         <Outlet />
       </main>

@@ -1,71 +1,214 @@
 # Changelog
 
-## v0.6.6 — DRAFT spec: Obsidian embed mode (`?embed=1`)
+## v0.6.6 — Obsidian embed mode (`?embed=1`)
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.6-amendment.md`,
-applied on top of current `main` HEAD (post v0.6.5).
-
-UI/routing change — first non-Telegram release since v0.6.0. Closes
-the loop on this arc's original framing (Chase AI's Obsidian
-command-centre video) without shipping an Obsidian companion plugin:
-just strip dashboard chrome when `?embed=1` query param is set, so
-operators can paste the URL into Obsidian's web-viewer plugin and
-get the dashboard rendered next to their notes.
+applied on top of current `main` HEAD (post v0.6.5). First non-
+Telegram release since v0.6.0. Closes the loop on this arc's original
+framing (Chase AI's Obsidian command-centre video) without shipping
+an Obsidian companion plugin: when `?embed=1` is set, the dashboard
+strips its chrome (Nav, header, command palette, emergency-stop
+banner, footer) so operators can paste the URL into Obsidian's
+web-viewer plugin and get the panels rendered next to their notes.
+No Obsidian SDK, no plugin manifest, no custom integration to
+maintain — the iframe is the contract.
 
 Numbered `v0.6.6` (patch over v0.6.5). Alternative `v0.7.0`
-defensible (first product-surface expansion since v0.6.0).
-Recommendation: `v0.6.6` keeps the v0.6.x patch cadence; override
-at build time if minor-bump preferred.
+defensible (first product-surface expansion since v0.6.0); kept the
+patch cadence because there's no schema, no new endpoint, no operator
+config — `?embed=1` is invisible to every existing feature.
 
 ### Why this release
 
-Dashboard is currently a standalone localhost web app — operators
-who run Obsidian as their daily knowledge base have to context-
-switch between vault and browser tab. `?embed=1` is the minimum-
-viable bridge: dashboard stays standalone, but operators who want
-eye-level co-presence install Obsidian's web-viewer plugin and
-paste the embed URL. No Obsidian SDK, no plugin manifest, no
-custom integration burden.
+Dashboard is a standalone localhost web app at `127.0.0.1:8765`.
+Operators who use Obsidian as their daily knowledge base have to
+context-switch between vault and a separate browser tab. `?embed=1`
+is the minimum-viable bridge: dashboard stays standalone, but
+operators who want eye-level co-presence install Obsidian's
+web-viewer plugin and paste the embed URL into a pane. No new
+dependency burden on either side.
 
-### What's planned
+### What ships
 
-- **`?embed=1` query param** detected in `AppShell.tsx` via
-  TanStack Router's `useSearch`. Conditional render hides `Nav`,
-  `Header`, `CommandPalette`, `EmergencyStopBanner` when set;
-  `<Outlet />` content + `AttentionBar` (rendered inside pages,
-  not AppShell) stay visible.
-- **Embed-mode CSS** — tighter padding (16px vs 24-32px), optional
-  smaller font at narrow widths (<600px), tighter card spacing.
-- **Internal link preservation** — every `<Link>` in panels gets
-  `search={(prev) => prev}` so navigation between pages keeps the
-  `embed=1` flag. Operator stays in embed mode without manual
-  re-pasting.
-- **Backend X-Frame audit** — verify no `X-Frame-Options: DENY` is
-  sent; add CSP `frame-ancestors` allowlist optionally (deferred
-  to v0.7+ if real Obsidian testing needed).
-- **README section** — install web-viewer plugin, paste embed URL,
-  pin pane. Documents the EmergencyStopBanner-hidden trade-off
-  explicitly (operator opens dashboard outside Obsidian for
-  emergencies).
-- **Playwright spec** covering 4 cases: embed hides chrome, no-embed
-  renders full chrome, navigation preserves flag, AttentionBar
-  visible in embed.
+Frontend only — three TypeScript files + one stylesheet + README +
+this CHANGELOG entry. No schema change, no new endpoint, no
+backend code change (the FastAPI server already ships no
+`X-Frame-Options` and no `Content-Security-Policy`, so the
+Obsidian iframe loads without adjustment — see the README section
+for the `curl -I` verification).
+
+- **TanStack Router root-search type** (`ui/src/router.tsx`).
+  `rootRoute.validateSearch` now accepts an optional
+  `embed?: string`, declared inline as a `RootSearch` type so
+  `useSearch({ from: '__root__' })` returns the flag with
+  TypeScript happiness. Strings only (`'1'`, `'true'`, anything
+  else); the truthiness check lives in AppShell. Empty object when
+  the param is absent.
+- **AppShell conditional render** (`ui/src/components/layout/AppShell.tsx`).
+  Reads the root `embed` param; when it's `'1'` or `'true'` the
+  component early-returns a stripped layout — just
+  `<div class="app-shell embedded">` → `<main class="main embedded">`
+  → `<Outlet />`. Header (Command Centre branding + Nav + StatePill
+  + ⌘K trigger), `EmergencyStopBanner`, footer (`local · 127.0.0.1
+  …`), and `CommandPalette` are dropped from the tree entirely
+  (conditional render, not CSS `display:none` — keeps the DOM
+  clean for Obsidian's narrow iframe). Non-embed path is byte-
+  identical to v0.6.5.
+- **`AttentionBar` stays visible.** It's rendered inside
+  `CommandPage` (and any future page that opts in), not in
+  AppShell, so the chrome strip leaves it intact. Stuck loops,
+  failed tasks, dispatcher silence, `cost_capped`, back-pressure —
+  all still surface inside the embedded pane. This was the
+  critical-signal-carve-out call from the amendment: keep the bar,
+  drop the banner.
+- **Embed-mode CSS** (`ui/src/styles.css`). Vanilla CSS rules
+  scoped under `.app-shell.embedded`, no new Tailwind utilities:
+  zero outer padding, 16px main padding (was Tailwind `px-6 py-8`
+  = 24/32px), tighter 12px gap between Command-page sections
+  (overrides Tailwind's `space-y-6` = 24px when nested under
+  `.embedded`), and a `@media (max-width: 600px)` rule shrinking
+  body font to 13px so KPI labels and card titles don't wrap in a
+  narrow Obsidian pane. Single block, ~20 lines.
+- **Internal link preservation.** `Nav.tsx`'s `<Link>` and every
+  `useNavigate({ to })` call in `CommandPalette.tsx` now pass
+  `search: (prev) => prev`, the canonical TanStack Router idiom for
+  carrying the current search params across navigation. Today the
+  Nav and palette are hidden in embed mode so the change is dormant;
+  the value is the convention — any future panel-internal `<Link>`
+  inherits the embed-flag-preservation behaviour by example, and
+  Playwright stop 3 covers the cross-route case directly.
+- **README — "Embed in Obsidian (optional, v0.6.6+)" section.**
+  Step-by-step plugin install + paste + pane-drag flow, an
+  explicit callout that EmergencyStopBanner is hidden by design and
+  the operator's recovery path is to open
+  `http://127.0.0.1:8765/` (without `?embed=1`) in a regular
+  browser, plus a host-local `curl -I` snippet to confirm no iframe-
+  blocking headers exist.
 
 ### Schema delta
 
-None. Frontend + 1 backend header audit, no data layer changes.
+None. UI + docs only. The `embed` flag lives purely in the URL
+query string and is read by `AppShell` at render time; no
+persistence, no API contract change.
 
-### Status
+### Verified
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+`command-centre/ui/tests/e2e/v0.6.6.spec.ts` covers amendment stop
+conditions 1–4 against a deterministic API fixture (mocked the same
+way as `v0.6.spec.ts` so the suite doesn't need real seed data).
+**4 / 4 specs.**
 
-Estimate: ~2-3h. UI surface + manual Obsidian smoke + Playwright;
-larger than v0.6.5 (~1h) but smaller than v0.6.0 / v0.6.3 (no
-schema, no new endpoints, no operator config).
+- **Stop 1 — embed=1 hides chrome.** `GET /?embed=1` renders
+  CommandPage without `Command Centre` branding, without any
+  `Activity` / `Sessions` Nav links, without the red Emergency-stop
+  button, without the `⌘K` palette trigger, and without the
+  `no cloud · no account · no outbound telemetry` footer line. The
+  `.app-shell.embedded` wrapper class is present so the CSS rules
+  engage.
+- **Stop 2 — no embed unchanged.** `GET /` renders all five
+  surfaces (branding, Nav, EmergencyStopBanner, ⌘K, footer)
+  unchanged. `.app-shell.embedded` is absent. No visual diff vs
+  v0.6.5 — existing `smoke.spec.ts` and `v0.6.spec.ts` continue to
+  pass without modification.
+- **Stop 3 — every route honours the flag.** Loops over
+  `/?embed=1`, `/activity?embed=1`, `/skills?embed=1`,
+  `/sessions?embed=1`, `/decisions?embed=1` and asserts the embed
+  wrapper is present and the chrome (branding + emergency-stop) is
+  absent on each. This is the proxy test for cross-route
+  preservation: if the operator clicks an in-app link that uses
+  `search: (prev) => prev`, the URL stays `…?embed=1` and the same
+  AppShell branch fires — exactly what the loop verifies.
+- **Stop 4 — AttentionBar survives in embed.** Mocks
+  `/api/attention` with one `dispatcher_stale` issue, loads
+  `/?embed=1`, asserts both the red `Needs attention` header and
+  the issue text (`dispatcher silent 180s`) are visible. Confirms
+  the critical-signal carve-out: chrome is gone but the in-page
+  attention surface is not.
+- **Stop 6 — no iframe-blocking header.**
+  `grep -n 'middleware\|X-Frame\|frame_options\|Content-Security'
+  command-centre/scripts/server.py` returns no matches; FastAPI
+  does not add `X-Frame-Options` by default, so localhost iframe
+  embedding works without backend change. The README documents the
+  `curl -I` repro for operators on non-default proxy setups.
+- **Stop 9 — backward compat.** The existing
+  `tests/e2e/smoke.spec.ts` and `tests/e2e/v0.6.spec.ts` keep
+  passing unchanged; embed mode is gated on the search param and
+  the non-embed path is byte-identical to v0.6.5. `tsc --noEmit`
+  is clean.
+
+Stops 5 (critical-signal carve-out documented) and 7 (manual
+Obsidian smoke) are operator-side. Stop 5 is satisfied by the
+README's explicit hidden-by-design callout. Stop 7 needs a real
+Obsidian install + Web Viewer plugin and is intentionally
+deferred to the operator's first post-deploy run:
+
+1. Install the Web Viewer community plugin in Obsidian, enable
+   it, restart Obsidian.
+2. Run `cc start` if the dashboard isn't already up.
+3. Command palette → **Web Viewer: Open web page in new tab** →
+   paste `http://127.0.0.1:8765/?embed=1` → Enter.
+4. Drag the tab into a side pane.
+5. Verify: chrome is stripped, panels render, clicking a
+   SkillLauncher card's **Launch** button fires the task (toast
+   should show `↗ Task #N`).
+6. Trigger a dispatcher stall (or wait for natural attention) and
+   confirm the red `Needs attention` bar appears inside the
+   embedded pane.
+
+If step 5 or 6 fails, capture the iframe DevTools console and
+file against this CHANGELOG entry.
+
+### Operator flow
+
+```bash
+cc restart                       # no migration; UI ships in ui/dist
+# Browser, regular tab:
+open http://127.0.0.1:8765/      # full dashboard, as before
+# Obsidian, with Web Viewer plugin installed:
+#   ⌘P → Web Viewer: Open web page in new tab
+#   paste: http://127.0.0.1:8765/?embed=1
+#   drag the tab to the right sidebar
+# Optional — verify no header blocks the iframe:
+curl -I http://127.0.0.1:8765/?embed=1 | grep -iE 'x-frame|content-security'
+# (no output expected)
+```
+
+### Tunables
+
+None this release. The embed mode is a single boolean toggle.
+Alternative pane-sized modes (`?embed=compact`, `?embed=tab`),
+theme matching (`?theme=light|dark`), and a compact inline
+emergency-stop variant are all on the v0.7+ list — see "Not in
+this release" below.
+
+### Not in this release (deferred)
+
+- **Compact inline `EmergencyStopBanner` for embed mode.** The
+  amendment floats a one-line red-dot variant that injects above
+  `<Outlet />` only when `emergency_stop` is engaged. Deferred:
+  needs a small `GET /api/system/state` poll inside the embed
+  branch and a separate visual treatment, and the MVP carve-out
+  (hide entirely, operator falls back to the non-embed tab) is
+  honest and unambiguous. Revisit once at least one operator
+  reports the round-trip as friction.
+- **CSP `frame-ancestors` hardening.** Adding
+  `Content-Security-Policy: frame-ancestors 'self' app://obsidian.md`
+  would lock embedding to Obsidian + same-origin and refuse other
+  frames. Skipped until real Obsidian iframe testing has confirmed
+  the actual `origin` it presents (`app://obsidian.md` is the
+  documented value; verify before committing to it as a CSP
+  allowlist entry).
+- **Theme matching (`?theme=light|dark`).** Dashboard is dark-only.
+  Obsidian's default dark theme is close enough that most operators
+  won't notice; a real light-theme port is a v0.8+ design surface,
+  not a v0.6.x patch.
+- **`?embed=compact|tab|wide` pane-sized variants.** MVP is one
+  embed mode. Add variants when usage data shows operators
+  consistently using narrow vs wide panes — premature today.
+- **Obsidian companion plugin.** Out of strategy. The iframe path
+  keeps the dashboard standalone and avoids tying releases to
+  Obsidian's plugin-store cadence.
 
 ---
 

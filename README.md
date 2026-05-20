@@ -117,6 +117,48 @@ to a `watchdog`-backed FSEvents observer that fires within ~2 seconds of
 a JSONL write. The polling loop is the proven, zero-dep path; FSEvents is
 opt-in until it has accumulated more soak time.
 
+### Embed in Obsidian (optional, v0.6.6+)
+
+The dashboard can be rendered inside Obsidian's web-viewer plugin so it
+sits next to your notes instead of in a separate browser tab. Append
+`?embed=1` to the dashboard URL and Obsidian's iframe gets a stripped
+layout — no Nav, no header, no command palette, no footer chrome — just
+the panels.
+
+1. In Obsidian, **Settings → Community plugins → Browse**, search **Web
+   Viewer**, install and enable.
+2. Open the command palette (`⌘P` / `Ctrl+P`) → run **Web Viewer: Open
+   web page in new tab**.
+3. Paste `http://127.0.0.1:8765/?embed=1` and press Enter.
+4. Drag the tab to your preferred pane (the right sidebar fits a single
+   column of cards nicely; a wide bottom split works for the full grid).
+
+The embed flag is preserved across in-app navigation — clicking from
+Command to Sessions to Activity inside the embedded pane stays in embed
+mode. The `AttentionBar` (stuck loops, failed tasks, dispatcher silence,
+risk-gate cost cap) renders inside pages, so it stays visible in the
+embed — your critical-signal surface is intact.
+
+**Emergency stop in embed mode is hidden by design.** The `?embed=1`
+layout drops the `EmergencyStopBanner` because its big red button
+clutters a narrow Obsidian pane. To trigger emergency stop, open
+`http://127.0.0.1:8765/` (without `?embed=1`) in a regular browser
+tab — the full chrome plus the banner come back. Operators who want
+the banner inside Obsidian should keep a second non-embed pane open as
+a panic button; a compact inline variant is on the v0.7+ list.
+
+**No backend change is required.** The FastAPI server doesn't send
+`X-Frame-Options` or any `Content-Security-Policy` headers, so the
+Obsidian web-viewer iframe loads `127.0.0.1:8765` without adjustment.
+Verify on your own host with:
+
+```bash
+curl -I http://127.0.0.1:8765/?embed=1 | grep -iE 'x-frame|content-security'
+```
+
+If grep prints nothing, you're good. If your reverse proxy adds one
+(uncommon for localhost), drop it for the dashboard origin.
+
 ## Repo layout
 
 ```

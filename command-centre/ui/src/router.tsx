@@ -8,10 +8,18 @@ import SkillsPage from '@/pages/SkillsPage';
 import SessionsPage from '@/pages/SessionsPage';
 import DecisionsPage from '@/pages/DecisionsPage';
 
+// v0.6.6: optional `?embed=1` flag, read by AppShell to strip chrome
+// when the dashboard is rendered inside Obsidian's web-viewer iframe.
+type RootSearch = { embed?: string };
+
 const rootRoute = createRootRoute({
   component: () => (
     <AppShell />
   ),
+  validateSearch: (search: Record<string, unknown>): RootSearch => {
+    const embed = search.embed;
+    return embed === undefined || embed === null ? {} : { embed: String(embed) };
+  },
   notFoundComponent: () => (
     <div className="text-center py-24 text-text-dim">
       <div className="text-4xl font-mono mb-2 text-text">404</div>

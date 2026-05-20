@@ -50,17 +50,24 @@ export function CommandPalette() {
   const close = () => setOpen(false);
 
   const actions: Action[] = useMemo(() => ([
+    // v0.6.6: `search: (prev) => prev` preserves `?embed=1` (and any
+    // future root-level search params) across navigation. Palette is
+    // hidden in embed mode today, but keeping the idiom uniform means
+    // any future panel-internal navigation already matches the spec.
     {
       id: 'nav-command', label: 'Go to Command', icon: <Gauge size={16} />,
-      keywords: 'home dashboard index', run: () => { nav({ to: '/' }); close(); },
+      keywords: 'home dashboard index',
+      run: () => { nav({ to: '/', search: (prev) => prev }); close(); },
     },
     {
       id: 'nav-activity', label: 'Go to Activity', icon: <Activity size={16} />,
-      keywords: 'log firehose heatmap', run: () => { nav({ to: '/activity' }); close(); },
+      keywords: 'log firehose heatmap',
+      run: () => { nav({ to: '/activity', search: (prev) => prev }); close(); },
     },
     {
       id: 'nav-skills', label: 'Go to Skills & MCP', icon: <Layers size={16} />,
-      keywords: 'mcp servers tools', run: () => { nav({ to: '/skills' }); close(); },
+      keywords: 'mcp servers tools',
+      run: () => { nav({ to: '/skills', search: (prev) => prev }); close(); },
     },
     {
       id: 'action-sync', label: 'Sync now', icon: <RefreshCw size={16} />,
@@ -71,7 +78,7 @@ export function CommandPalette() {
       id: 'action-queue', label: 'Queue a task', icon: <Zap size={16} />,
       keywords: 'new task dispatcher', hint: 'opens composer on Command',
       run: () => {
-        nav({ to: '/' });
+        nav({ to: '/', search: (prev) => prev });
         // Composer opening is wired up later on index.tsx via a URL flag.
         setTimeout(() => {
           const btn = document.querySelector<HTMLButtonElement>('[data-action="open-task-composer"]');

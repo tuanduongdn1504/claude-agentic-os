@@ -30,6 +30,10 @@ export function Nav() {
           <Link
             key={to}
             to={to}
+            // v0.6.6: preserve `?embed=1` (and any future root-level
+            // search params) across in-app navigation so the operator
+            // stays in embed mode while clicking between pages.
+            search={(prev) => prev}
             className={cn(
               'inline-flex items-center gap-2 px-3 h-9 rounded-lg transition-colors',
               isActive

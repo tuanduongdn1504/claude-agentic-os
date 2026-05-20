@@ -46,3 +46,33 @@ body {
 
 /* ---------- Numeric tabular ---------- */
 .num { font-variant-numeric: tabular-nums; }
+
+/* ---------- v0.6.6: Obsidian embed mode (?embed=1) ----------
+   AppShell renders a stripped layout when embed=1: header, Nav,
+   EmergencyStopBanner, CommandPalette and footer are removed, and
+   the main content gets tighter padding so the dashboard fits in
+   a ~400-600px Obsidian panel. Tailwind classes set the desktop
+   defaults (px-6 py-8 space-y-6); these rules tighten them only
+   inside `.app-shell.embedded`, so non-embed renders are byte-
+   identical to current main.
+*/
+.app-shell.embedded { padding: 0; }
+
+.app-shell.embedded .main {
+  padding: 16px;
+  max-width: 100%;
+  margin: 0;
+}
+
+/* Pages use Tailwind `space-y-6` (24px) between sections; tighten to
+   12px inside embed so a 400px panel doesn't feel sparse. Targets
+   any element using Tailwind's space-y utility under the embedded
+   main, plus direct children of `<main>` itself. */
+.app-shell.embedded .main > * + *,
+.app-shell.embedded .main .space-y-6 > * + * { margin-top: 12px; }
+
+/* Narrow Obsidian panel: shrink fonts so KPI labels + card titles
+   don't wrap awkwardly. Threshold matches the amendment. */
+@media (max-width: 600px) {
+  .app-shell.embedded { font-size: 13px; }
+}
