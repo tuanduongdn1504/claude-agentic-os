@@ -1,5 +1,93 @@
 # Changelog
 
+## v0.6.7 — DRAFT spec: per-skill daily cost budgets
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.7-amendment.md`,
+applied on top of current `main` HEAD (post v0.6.6).
+
+Adds a per-skill axis to spending discipline. Each `user_invocable=1`
+skill optionally gets `daily_budget_usd`; dispatcher refuses to claim
+tasks for that skill once today's `cost_source='api_pool'` spend
+reaches the budget. Composes with the global
+`MISSION_CONTROL_DAILY_COST_CAP_USD` cap from v0.2.0 — both apply,
+whichever triggers first wins.
+
+Multi-surface release (schema + dispatcher + API + UI + Telegram
+outbound) but each surface mirrors an existing v0.2.0 / v0.6.0
+pattern, so the risk is in breadth not novelty.
+
+Numbered `v0.6.7` (patch over v0.6.6) — pattern is a mechanical
+extension of the existing cap shape, not a new architecture
+concept. Alternative `v0.7.0` defensible for the multi-surface
+scope.
+
+### Why this release
+
+Global cap is opaque about WHICH skill ate the budget. Per-skill
+budgets give the operator a clear signal — "morning-brief blocked
+at $0.85 today, deep-research still has $3.20 of its $5.00 budget"
+— instead of generic global-cap exhaustion. NULL = unlimited
+(current behaviour); 0 = blocked (disable without delete); positive
+= cap.
+
+### What's planned
+
+- **`skills.daily_budget_usd REAL NULL`** column via additive
+  `_migrate_add_column`. Idempotent. NULL keeps every existing
+  skill behaving as today.
+- **`PATCH /api/skills/{name}/budget`** new endpoint (mirrors the
+  existing `PATCH .../autonomy` column-update precedent).
+- **`GET /api/skills`** augmented with `daily_budget_usd` +
+  `today_cost_usd` per row. Today's spend computed via the same
+  `cost_source='api_pool' AND DATE(completed_at,'localtime')=today`
+  predicate the global cap uses (v0.6.0 cap rewrite).
+- **`GET /api/system/dispatcher`** augmented with
+  `skills_with_budget` + `skills_at_budget` counts for AttentionBar
+  + DispatcherStrip without N+1 fanout.
+- **Dispatcher pre-claim check** inserted between global cap and
+  per-task autonomy. Post-hoc (matches v0.2.0 shape — over-spend
+  by at most one task's cost). Logs
+  `dispatcher_skill_budget_capped` activity row.
+- **`/api/attention` aggregator** — new `skill_budget_capped` issue
+  type with `warning` severity (yellow, not red — operator-tuneable,
+  expected to trigger more often than global cap).
+- **SkillLauncher card** — 3-tier visual state: dim (under 0.8 ×
+  budget), amber (0.8 ≤ today < budget), red + disabled Launch
+  (today ≥ budget). Hidden when budget is NULL.
+- **Inline preset editor** — new "Budget (optional)" section with a
+  numeric input. Separate PATCH call from the preset blob to
+  signal different concerns (preset = launch defaults, budget =
+  spending policy).
+- **Telegram outbound `skill_budget_exceeded`** event type — first-
+  fire push per skill per day, dedupe key
+  `{skill_name}:{today_local_date}`. Format mirrors v0.5.0-mvp1
+  `_format_task_complete` shape.
+
+### Schema delta
+
+One column, additive next to v0.6.0's `preset_json` /
+`last_launched_at` / `launch_count`:
+
+| Table | Column | Type | Default |
+|---|---|---|---|
+| `skills` | `daily_budget_usd` | REAL | NULL |
+
+Idempotent. NULL semantics preserved; existing skills unchanged.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: ~3-4h. Largest scope since v0.6.0 because of multi-surface
+breadth (schema + dispatcher + UI + Telegram + Playwright). All
+surfaces mirror proven patterns.
+
+---
+
 ## v0.6.6 — Obsidian embed mode (`?embed=1`)
 
 Built against the amendment in
