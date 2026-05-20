@@ -1,17 +1,15 @@
 # Changelog
 
-## v0.6.5 — DRAFT spec: Telegram `/yes <id>` + `/no <id>` slash commands
+## v0.6.5 — Telegram `/yes <id>` + `/no <id>` slash commands
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.5-amendment.md`,
-applied on top of current `main` HEAD (post v0.6.4).
-
-Fourth Phase 2 feature from the Telegram Remote Trigger PRD —
-no-heuristic alternative to the deferred inline keyboard
-`[Yes] [No]`. Bridge-only — single file change to
-`telegram_bridge.py` plus this CHANGELOG entry. No schema changes,
-no new endpoints, no breaking changes. Smallest scope in the
-v0.6.x patch sequence.
+applied on top of current `main` HEAD (post v0.6.4). Fourth Phase 2
+feature from the Telegram Remote Trigger PRD —  no-heuristic
+alternative to the deferred inline keyboard `[Yes] [No]`. Bridge-only
+— single file change to `telegram_bridge.py` plus this CHANGELOG entry.
+No schema changes, no new endpoints, no breaking changes. Smallest
+scope in the v0.6.x patch sequence.
 
 Numbered `v0.6.5` (patch over v0.6.4) — same Telegram-bridge
 subsystem, cadence consistent with v0.6.1 / v0.6.2 / v0.6.3 /
@@ -25,45 +23,151 @@ heuristic — defer until 10+ real examples accumulate.
 explicitly per decision, types two keystrokes on phone instead of
 "yes" or "no" as free-text. Same API payload, shorter input. Once
 inline keyboard ships in v0.7+, `/yes`/`/no` stays as the typed
-fallback.
+fallback and the slash-command path becomes the data source for the
+heuristic (every `/yes`/`/no` answer in `ops_decisions` is a
+labelled binary example).
 
-### What's planned
+### What ships
 
-- **`/yes <id>` and `/no <id>` slash commands.** Extend
+All changes in `command-centre/scripts/telegram_bridge.py` (+72 / -4)
+plus a dev smoke script (`scripts/dev/smoke_v0_6_5.py`). No new
+dependencies, stdlib only.
+
+- **`/yes <id>` and `/no <id>` slash commands.** Extends
   `_CMD_WITH_ID_RE` from `(answer|reply|approve|cancel|snooze)` to
-  add `yes|no` verbs (body optional — these take no body). Two
-  verb arms in `_handle_message`'s with-ID branch.
-- **`_handle_yes_no(chat_id, decision_id, answer)`** — thin POST
-  wrapper around the existing `/api/decisions/{id}/answer`
-  endpoint. Returns `✅ decision #{id} answered: {yes|no}` on
-  success, surfaces API 400/404 errors verbatim on failure.
+  `(answer|reply|approve|cancel|snooze|yes|no)` — the new verbs
+  keep the optional body group (the regex's `(?:\s+(.+))?`
+  trailer carries over from `/snooze`'s grammar; for `yes` / `no`
+  the body is ignored if anyone supplies one). Two new verb arms
+  in `_handle_message`'s with-ID branch route both to
+  `_handle_yes_no`.
+- **`_handle_yes_no(chat_id, message_id, decision_id, answer)`** —
+  thin POST wrapper around the existing
+  `POST /api/decisions/{id}/answer` endpoint. Normalizes the
+  answer string to lowercase `"yes"` or `"no"` before sending, so
+  `/YES 42` and `/Yes 42` both record `answer='yes'`. Replies
+  `✅ decision #{id} answered: yes` on 200, `decision #{id}
+  already answered` when the API returns 200 with
+  `{"already": true}` (the real shape for an already-answered
+  decision — the spec said 400, but the existing
+  `/api/decisions/{id}/answer` returns 200 + flag, which the
+  handler surfaces as a distinct branch so the operator hint is
+  precise), `decision #{id} not found` on 404, and a verbatim
+  `decision #{id} · {detail}` on 400. NFR11: every error branch
+  emits a reply and returns; the long-poll loop never raises.
 - **Reply-to-decision shortcut.** Reply to a `❓ DECISION`
-  notification with bare `/yes` / `/no` / `yes` / `no` (case-
-  insensitive, strict whole-message) → resolves decision_id via
-  `_lookup_by_tg_message` → answers `yes` or `no`. Longer replies
-  like `Yes, do it` fall through to existing verbatim routing
-  unchanged.
-- **No audit-log row.** Matches the existing `/answer` slash
-  pattern from v0.3.0; the decisions answer endpoint is the
-  audit source. Departs from mvp2's audit-everything pattern on
-  purpose — `/answer` already doesn't audit; `/yes`/`/no` are
-  shortcuts to the same code path.
-- **`/help`** extended with the new pattern.
+  notification with the exact text `/yes`, `/no`, `yes`, or `no`
+  (case-insensitive, after `.strip()`) → resolves the decision_id
+  via the existing `_lookup_by_tg_message` → calls
+  `_handle_yes_no` with the normalized lowercase answer. The check
+  is scoped to `event_type == 'decision'` and placed BEFORE the
+  v0.6.2 `/snooze` reply-branch and the v0.3.0 verbatim
+  `_route_reply` fallback. A reply of `/yes` to a task-complete
+  notification routes through the v0.6.4 follow-up branch (which
+  returns earlier in the same function), not through this
+  shortcut — task-complete replies remain follow-up bodies.
+- **Strict whole-message match.** Longer replies like
+  `Yes, do it` or `No — defer` are NOT collapsed: they fall
+  through to the existing verbatim `_route_reply('decision', ...)`
+  so the operator's nuance lands in `ops_decisions.answer`
+  unchanged. Only the four literals trigger the shortcut.
+- **No `activities` audit row.** Matches the existing `/answer`
+  slash pattern from v0.3.0 — the decisions answer endpoint is
+  the audit source, not the bridge. Deliberate departure from
+  mvp2's audit-everything-from-Telegram pattern for state-changing
+  commands because `/yes` and `/no` route through the same code
+  path as `/answer`, which itself doesn't audit. The smoke
+  verifies `activities` row count does not change after `/yes`,
+  `/no`, or `/answer`.
+- **`/help`** extended with `/yes <decision_id>` ·
+  `/no <decision_id>` and the reply-to-DECISION shortcut hint.
 
 ### Schema delta
 
-None. Read-only data flow via existing endpoints.
+None. Read-only data flow via the existing
+`POST /api/decisions/{id}/answer` endpoint.
 
-### Status
+### Verified
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+`command-centre/scripts/dev/smoke_v0_6_5.py` walks all 9 amendment
+stop conditions plus the regex fixture pre-check against a real
+FastAPI server on `127.0.0.1:8869` (spawned in a temp
+`$CC_INSTALL_DIR`), with a stubbed `_tg` capture so no real Bot API
+call is made. **43 / 43 checks pass.**
 
-Estimate: ~45-60 min. Smallest in the arc — no schema, no new
-endpoints, no UI surface, no operator config. Just regex + handler
-+ reply-shortcut recognition.
+- **R — regex fixtures.** `/yes 42` and `/no 42` parse with
+  `(verb, '42', None)`; `/YES 42` / `/Yes 42` parse
+  case-insensitively; `/answer 42 body` and `/snooze 42 30m` still
+  carry the optional body group; `/yes abc` / `/yes` / `/yesno 42`
+  do not match (regex enforces `\d+` and exact verb alternation).
+- **S1 — `/yes <id>` happy path.** `/yes 1` flips `ops_decisions.id=1`
+  to `status='answered'`, `answer='yes'`; bridge replies
+  `✅ decision #1 answered: yes`; `activities` row count is
+  unchanged from before the call.
+- **S2 — `/no <id>` happy path + no-audit.** `/no 2` flips to
+  `answer='no'` (lowercase); reply confirms; `activities` count
+  unchanged. `/YES 42` answers with lowercase `yes` (normalization
+  verified).
+- **S3 — reply-to-msg `/yes` shortcut.** Reply with body `/yes` to
+  a notification whose `notification_log` row points at decision
+  `#N` → `ops_decisions.id=N` flips to `answer='yes'` (NOT
+  `/yes` — the bridge strips the slash before POSTing).
+- **S4 — reply-to-msg bare `yes` / `no` / `/No`.** All three case-
+  variants resolve the decision via `_lookup_by_tg_message` and
+  record the lowercase answer. Mixed-case `/No` also normalizes.
+- **S5 — verbatim fallback preserved.** Reply with `Yes, do it`
+  → `ops_decisions.answer='Yes, do it'` (verbatim, NOT collapsed
+  to `yes`). Same for `No — defer`. Operator nuance survives.
+- **S6 — already-answered decision.** Answer #10 with `/yes 10`,
+  then re-send `/yes 10` → bridge replies
+  `decision #10 already answered`. The API returns 200 with
+  `{"already": true}`, not 400 — the handler surfaces that branch
+  directly. No state change.
+- **S7 — non-existent decision.** `/yes 9999` →
+  `decision #9999 not found` (the API's 404 → 404 branch).
+- **S8 — malformed input (NFR11).** `/yes abc`, `/yes`, `/no` all
+  fail the regex (no `\d+`) and fall through; no DB mutation, no
+  crash. Long-poll continues.
+- **S9 — backward compat.** All existing verbs still parse
+  (`/answer`, `/reply`, `/approve`, `/cancel`, `/snooze`, `/run`,
+  `/status`); end-to-end `/answer 42 option A` still flips
+  `ops_decisions.status='answered'` with `answer='option A'`;
+  `/help` still renders and now mentions both `/yes` and `/no`.
+
+### Operator flow
+
+```bash
+cc restart                    # no migration this release; bridge restarts.
+# In Telegram, on a pending ❓ DECISION `#42`:
+/yes 42                       # → ✅ decision `#42` answered: yes
+# Or, replying to the DECISION push directly:
+yes                           # bare yes (or /yes, /no, no) — strict match
+# Nuanced replies still work verbatim:
+Yes, but only after the EAS build finishes
+# → recorded as ops_decisions.answer='Yes, but only after the EAS build finishes'
+```
+
+### Tunables
+
+None. The shortcut grammar is intentionally the four literals
+`/yes` / `/no` / `yes` / `no` — adding `y` / `n` or `yep` / `nope`
+expands the surface without clear benefit; operators who want
+nuance type free text and get verbatim capture.
+
+### Not in this release (deferred)
+
+- **Inline keyboard `[Yes] [No]`** — still needs the binary
+  heuristic. The `/yes` and `/no` commands now feed the heuristic
+  designer real data: every binary answer recorded in
+  `ops_decisions` via this slash path is a labelled binary
+  example. Build inline keyboard once 10+ examples accumulate.
+- **`/maybe` or other multi-option presets** — operators can use
+  `/answer <id> <text>` for nuanced answers. Don't multiply slash
+  verbs for every imaginable choice.
+- **Decision categorisation in the dashboard** — surfacing which
+  decisions historically had binary yes/no answers vs free-text.
+  Useful for inline-keyboard heuristic design later but out of
+  scope.
 
 ---
 

@@ -408,7 +408,7 @@ def _outbound_loop() -> None:
 # optional in _CMD_WITH_ID_RE so /approve and /cancel parse without one.
 # `/status` is a third sibling — strict whole-message match, no args.
 _CMD_WITH_ID_RE = re.compile(
-    r"^/(answer|reply|approve|cancel|snooze)\s+(\d+)(?:\s+(.+))?$",
+    r"^/(answer|reply|approve|cancel|snooze|yes|no)\s+(\d+)(?:\s+(.+))?$",
     re.IGNORECASE | re.DOTALL,
 )
 _CMD_RUN_RE = re.compile(r"^/run\s+(.+)$", re.IGNORECASE | re.DOTALL)
@@ -699,6 +699,64 @@ def _handle_snooze(chat_id: Any, message_id: Any, decision_id: int,
         _reply_text(chat_id, message_id,
                     f"✅ decision `#{decision_id}` snoozed for {normalized} "
                     f"— next re-fire {wake}")
+
+
+# ---------------------------------------------------------------------------
+# /yes /no — v0.6.5, Phase 2.
+# ---------------------------------------------------------------------------
+#
+# Binary-decision shortcuts: `/yes <id>` and `/no <id>` answer a pending
+# decision with the literal string "yes" / "no". Same payload as
+# `/answer <id> yes` — just two keystrokes on a phone. Also fires as a
+# reply-to-DECISION-msg shortcut when the body is exactly `/yes`, `/no`,
+# `yes`, or `no` (case-insensitive, strict whole-message). No audit row —
+# matches the existing `/answer` slash pattern from v0.3.0 (the decisions
+# answer endpoint is the audit source), deliberately departing from
+# mvp2/v0.6.2/v0.6.4's audit-everything pattern for state-changing
+# commands because `/yes`/`/no` route through the same endpoint as
+# `/answer`, which itself does not audit.
+
+def _handle_yes_no(chat_id: Any, message_id: Any, decision_id: int,
+                   answer: str) -> None:
+    """`/yes <id>` / `/no <id>` (or reply-to-DECISION shortcut) — POST
+    /api/decisions/{decision_id}/answer with body `{"answer": "yes"|"no"}`.
+
+    Surfaces the API's 200 / 404 / 400 responses directly. The endpoint
+    returns 200 with `{"already": True}` for an already-answered decision
+    (not 400) — handled as a distinct branch so the operator sees an
+    accurate hint without ambiguity.
+
+    NFR11: malformed input never crashes the long-poll loop — every
+    branch emits a reply and returns."""
+    answer = (answer or "").strip().lower()
+    try:
+        res = _http_post_json(
+            f"{DASHBOARD_URL}/api/decisions/{decision_id}/answer",
+            {"answer": answer},
+        )
+    except Exception as exc:
+        code, body = _http_status_from_exc(exc)
+        safe_body = _md_safe(body) if body else ""
+        if code == 404:
+            _reply_text(chat_id, message_id,
+                        f"decision `#{decision_id}` not found")
+        elif code == 400:
+            _reply_text(chat_id, message_id,
+                        f"decision `#{decision_id}` · {safe_body}")
+        elif code is not None:
+            _reply_text(chat_id, message_id,
+                        f"⚠️ answer failed · {code} · {safe_body}")
+        else:
+            _reply_text(chat_id, message_id,
+                        f"⚠️ answer failed · {safe_body}")
+        return
+
+    if isinstance(res, dict) and res.get("already"):
+        _reply_text(chat_id, message_id,
+                    f"decision `#{decision_id}` already answered")
+        return
+    _reply_text(chat_id, message_id,
+                f"✅ decision `#{decision_id}` answered: {answer}")
 
 
 # ---------------------------------------------------------------------------
@@ -1175,13 +1233,15 @@ def _handle_status(chat_id: Any) -> None:
 def _handle_message(msg: dict) -> None:
     """Process a single Telegram message — reply-to or slash-command.
 
-    Routing order (v0.5.0-mvp2 + v0.6.1 + v0.6.2 + v0.6.4):
+    Routing order (v0.5.0-mvp2 + v0.6.1 + v0.6.2 + v0.6.4 + v0.6.5):
       1. reply-to-message → lookup notification_log
+         - risk_gated → /approve <task_id>              (v0.5.0-mvp2, FR17)
+         - task_complete → _handle_task_followup        (v0.6.4)
+         - decision + body `/yes`|`yes`|`/no`|`no` (strict whole-message)
+           → _handle_yes_no                              (v0.6.5)
          - decision  + body `/snooze [Nm|Nh|Nd]` → _handle_snooze  (v0.6.2)
          - decision  → POST /api/decisions/{id}/answer  (v0.3.0)
          - inbox     → POST /api/inbox/{id}/reply       (v0.3.0)
-         - risk_gated → /approve <task_id>              (v0.5.0-mvp2, FR17)
-         - task_complete → _handle_task_followup        (v0.6.4)
       2. slash command
          - /status                  → _handle_status    (v0.6.1, Phase 2)
          - /answer | /reply         → existing route_reply (v0.3.0)
@@ -1189,6 +1249,7 @@ def _handle_message(msg: dict) -> None:
          - /approve <id>            → _handle_approve   (v0.5.0-mvp2, FR16)
          - /cancel <id>             → _handle_cancel    (v0.5.0-mvp2, FR18)
          - /snooze <id> [duration]  → _handle_snooze    (v0.6.2, Phase 2)
+         - /yes <id> | /no <id>     → _handle_yes_no    (v0.6.5, Phase 2)
       3. /help | /start → usage text
     """
     chat = (msg.get("chat") or {}).get("id")
@@ -1233,6 +1294,26 @@ def _handle_message(msg: dict) -> None:
                         _reply_text(chat, message_id,
                                     f"⚠️ bad task id in notification_log: {event_key!r}")
                     return
+                # v0.6.5 — reply-to-DECISION-msg with bare `/yes` / `/no` /
+                # `yes` / `no` (case-insensitive, strict whole-message) →
+                # _handle_yes_no with the looked-up decision id. Longer
+                # replies like `Yes, do it` or `No — defer` fall through to
+                # the existing verbatim routing so operator nuance isn't
+                # collapsed. Scoped to event_type=='decision' so a reply of
+                # `/yes` to a task-complete notification stays a follow-up
+                # body (the task_complete branch above already returned).
+                if event_type == "decision":
+                    stripped = text.strip().lower()
+                    if stripped in ("/yes", "yes", "/no", "no"):
+                        ans = "yes" if stripped in ("/yes", "yes") else "no"
+                        try:
+                            _handle_yes_no(chat, message_id,
+                                           int(event_key), ans)
+                        except (ValueError, TypeError):
+                            _reply_text(chat, message_id,
+                                        f"⚠️ bad decision id in notification_log: {event_key!r}")
+                        return
+
                 # v0.6.2 — reply-to-DECISION-msg body `/snooze [duration]`
                 # routes to _handle_snooze with the looked-up decision id.
                 # Scope: decisions only for MVP — non-decision targets fall
@@ -1337,6 +1418,13 @@ def _handle_message(msg: dict) -> None:
             # default 30m inside _handle_snooze.
             _handle_snooze(chat, message_id, ref_id, body)
             return
+        elif verb in ("yes", "no"):
+            # v0.6.5 — `/yes <id>` / `/no <id>` binary-decision shortcut.
+            # Any body group after the id is ignored (these verbs take no
+            # body; the regex's optional group(3) just keeps the alternation
+            # consistent with answer/reply/snooze).
+            _handle_yes_no(chat, message_id, ref_id, verb)
+            return
 
     # 2d. Bare /run, /approve, /cancel without args → usage hint (NFR11).
     # /status with stray args (e.g. `/status foo`) falls through here too —
@@ -1370,9 +1458,11 @@ def _handle_message(msg: dict) -> None:
                 "`/run <prompt>` — queue a new headless task\n"
                 "`/approve <task_id>` — override a risk-gated task\n"
                 "`/cancel <task_id>` — cancel a pending / risk-gated task\n"
-                "`/snooze <decision_id> [30m|2h|1d]` — suppress re-fire (default 30m, max 24h)\n\n"
+                "`/snooze <decision_id> [30m|2h|1d]` — suppress re-fire (default 30m, max 24h)\n"
+                "`/yes <decision_id>` · `/no <decision_id>` — shortcut to answer a binary decision\n\n"
                 "_Reply to a_ 🛑 _RISK-GATED notification with any text to approve._\n"
-                "_Reply to a_ ❓ _DECISION notification with_ `/snooze [duration]` _to defer it._\n"
+                "_Reply to a_ ❓ _DECISION notification with_ `/snooze [duration]` _to defer it,_\n"
+                "_or with just_ `/yes` _/_ `/no` _(or bare_ `yes` _/_ `no` _) to answer it._\n"
                 "_Reply to a_ ✅ _task-complete notification with a follow-up instruction "
                 "to chain a new task with the previous task's output as context._"
             ),
