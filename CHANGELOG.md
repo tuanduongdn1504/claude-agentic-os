@@ -1,14 +1,14 @@
 # Changelog
 
-## v0.6.4 — DRAFT spec: Telegram reply-to-task-complete → follow-up `/run`
+## v0.6.4 — Telegram reply-to-task-complete → follow-up `/run`
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.4-amendment.md`,
-applied on top of current `main` HEAD (post v0.6.3).
-
-Third Phase 2 feature from the Telegram Remote Trigger PRD. Bridge-
-only — single file change to `telegram_bridge.py` plus this CHANGELOG
-entry. No schema changes, no new endpoints, no breaking changes.
+applied on top of current `main` HEAD (post v0.6.3). Third Phase 2
+feature from the Telegram Remote Trigger PRD
+(`command-centre/docs/prd-telegram-remote.md`). Bridge-only — single
+file change to `telegram_bridge.py` plus this CHANGELOG entry. No
+schema changes, no new endpoints, no breaking changes.
 
 Numbered `v0.6.4` (patch over v0.6.3) — same Telegram-bridge
 subsystem, cadence consistent with v0.6.1 / v0.6.2 / v0.6.3.
@@ -27,45 +27,176 @@ Closes Journey 1 deeper — "EAS build wait" becomes
 "EAS build wait → chain three tasks from phone while waiting" instead
 of "one task per build wait."
 
-### What's planned
+### What ships
 
-- **Reply-to-task-complete routing.** Extend `_lookup_by_tg_message`
-  (mvp2) to recognise `event_type='task_complete'` replies, route to
-  `_handle_task_followup`. Mirror of mvp2's
-  reply-to-RISK-GATED → `/approve` pattern.
-- **`_handle_task_followup(chat_id, prev_task_id, body)`** —
-  fetch prev task via `GET /api/tasks/{id}`, refuse on
-  `status in ('failed', 'cancelled')`, compose new task description
-  with prev title (truncated 80 chars) + prev output_summary
-  (truncated 300 chars) + `---` separator + operator's reply,
-  `POST /api/tasks` with `created_at_source='telegram'`, trigger
-  dispatcher inline (no 120s wait), audit-log to `activities` with
-  `event_type='task_followup_created'`, `source='telegram'`, reply
-  with new task ID.
-- **`/help` text** extended with the new pattern.
-- **Title composition:** `Follow-up: {operator_reply[:60]}` so
-  TaskBoard cards stay readable.
-- **No skill inheritance** — let dispatcher's `skill_router.py`
-  re-pick based on the new prompt. Operators wanting skill
-  continuity use `SkillLauncher` for the follow-up explicitly.
-- **No `parent_task_id` schema column** — context lives in the
-  description text. Lineage tracking is a v0.7+ UI concern.
+All changes in `command-centre/scripts/telegram_bridge.py` (+182 / -2)
+plus a dev smoke script (`scripts/dev/smoke_v0_6_4.py`). No new
+dependencies, stdlib only.
+
+- **Reply-to-task-complete routing.** Extends the `_handle_message`
+  reply-to-msg branch (the mvp2 extension point) with a
+  `task_complete` case — `_lookup_by_tg_message` already returns the
+  event_type for any row in `notification_log`, so no SQL change was
+  needed; only the calling branch grew a new dispatch arm. Mirrors
+  mvp2's reply-to-RISK-GATED → `/approve` shape.
+- **`_handle_task_followup(chat_id, message_id, prev_task_id, body)`** —
+  fetches prev task via a direct `ops_tasks` read (same pattern as
+  v0.6.2 `_handle_snooze`'s `ops_decisions` read — no GET endpoint
+  exists for a single task and adding one would violate the
+  bridge-only constraint); refuses on `status in ('failed',
+  'cancelled')` with a clear "chain on a successful task" hint;
+  refuses on a missing row with "task #N not found — notification
+  may reference a deleted task"; composes the new task description
+  with prev title (truncated 80 chars + ellipsis) + prev
+  output_summary (truncated 300 chars + ellipsis; literal
+  `(no output summary recorded)` when None / empty) + `---`
+  separator + operator's reply; `POST /api/tasks` with
+  `execution_mode='classic'`, `quadrant='do'`, `risk_level='low'`,
+  `created_at_source='telegram'`; INSERTs an `activities` row tagged
+  `event_type='task_followup_created'`,
+  `detail={prev_task_id, new_task_id, prev_title,
+  operator_reply_first_60, source: 'telegram'}` (FR19, matches
+  mvp2 + v0.6.2 audit-everything-from-Telegram pattern); triggers
+  the dispatcher inline via `POST /api/dispatcher/trigger` so the
+  new task transitions within ~1s instead of waiting for the 120s
+  heartbeat (same pattern as v0.6.0's `SkillLauncher.launch`);
+  replies `✅ task #M queued · follow-up to #N`.
+- **Title composition:** `Follow-up: {operator_reply[:60]}` with
+  ellipsis if the reply is longer than 60 chars and newlines
+  flattened so TaskBoard cards render one-line.
+- **No skill inheritance.** The new task is created without
+  `assigned_skill` or `model` — the existing dispatcher
+  `skill_router.py` re-picks based on the operator's new reply,
+  which may want a different skill than the original. Operators who
+  want skill continuity use `SkillLauncher` for the follow-up
+  explicitly.
+- **No `parent_task_id` schema column.** Context lives entirely in
+  the new task's `description` text; lineage is a v0.7+ UI concern
+  for a TaskBoard chain visualization, not an MVP need.
+- **Multi-hop is natural.** Reply to a follow-up's completion ping →
+  triggers another follow-up referencing the immediate parent (e.g.
+  `#43`), which itself was a follow-up of `#42`. No special multi-
+  hop detection — the description chain breaks at one level deep on
+  each reply.
+- **NFR11.** Whitespace-only reply text is filtered before reply-to-
+  msg routing by the existing bridge guard; empty reply bodies after
+  strip reply with `cannot create follow-up from empty reply`;
+  5000-char reply bodies create a task whose title is capped at
+  `Follow-up:` + 60 chars + ellipsis. Audit-row INSERT failures and
+  dispatcher-trigger failures log to stderr but do not block the
+  operator reply (the task is already created; worst-case the
+  dispatcher picks it up on the next 120s heartbeat).
+- **`/help` text** extended with the new pattern:
+  `Reply to a ✅ task-complete notification with a follow-up
+  instruction to chain a new task with the previous task's output
+  as context.`
 
 ### Schema delta
 
 None. All composition lives in the new task's `description` field;
 no new columns, no new endpoints.
 
-### Status
+### Verified
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+`command-centre/scripts/dev/smoke_v0_6_4.py` walks all 10 amendment
+stop conditions against a real FastAPI server on `127.0.0.1:8868`
+(spawned in a temp `$CC_INSTALL_DIR`), with a no-op `heartbeat.py`
+seeded so `/api/dispatcher/trigger` can write its activities row, and
+a stubbed `_tg` capture so no real Bot API call is made. **45 / 45
+checks pass.**
 
-Estimate: ~1.5-2h. Larger than v0.6.2 (composition + failure
-handling + multi-hop smoke), smaller than v0.6.1 / v0.6.3 (no
-schema, no operator config docs).
+- **S1 — happy path.** Seed a done task with title
+  `write hello to /tmp/hello.txt` + summary
+  `Wrote /tmp/hello.txt (1 line, 5 bytes).`. Reply to its
+  notification with `now write goodbye to /tmp/goodbye.txt`. New
+  task `#M` exists with title
+  `Follow-up: now write goodbye to /tmp/goodbye.txt`,
+  `created_at_source='telegram'`, `execution_mode='classic'`,
+  `quadrant='do'`, `risk_level='low'`; description contains the prev
+  `#N` reference + prev title + prev summary + `---` separator +
+  operator's reply. Bridge replies `✅ task #M queued · follow-up
+  to #N`.
+- **S2 — empty summary.** Seed a done task with `output_summary=NULL`.
+  New task's description carries the literal
+  `(no output summary recorded)` slot; everything else renders
+  correctly.
+- **S3 — failed task refusal.** Reply to a `❌ task #N failed`
+  notification → reply `task #N failed — chain on a successful task
+  or queue a fresh /run`. No new `ops_tasks` row. No
+  `task_followup_created` activities row. Cancelled-task parity
+  case (S3.5) also refuses with the same hint.
+- **S4 — deleted task.** Insert a fixture task, seed its
+  notification_log row, `DELETE FROM ops_tasks WHERE id=N`, then
+  reply to the (now-orphan) notification. Bridge replies
+  `task #N not found — notification may reference a deleted task`.
+- **S5 — truncation rules.** Seed a task with a 100-char title and a
+  500-char output_summary. New task's description shows the title
+  truncated at 80 chars + `…` (never 81+ T's) and the summary
+  truncated at 300 chars + `…` (never 301+ S's).
+- **S6 — multi-hop.** Run S1, then manually mark the new follow-up
+  as `done` with its own summary and seed a fresh notification_log
+  row. Reply to that notification with a third instruction. New
+  task's description references the immediate parent (`#M`), not
+  the grandparent (`#N`).
+- **S7 — audit log.** Each successful follow-up writes exactly one
+  `activities` row with `event_type='task_followup_created'` and
+  detail containing `prev_task_id`, `new_task_id`, `prev_title`
+  (full, not truncated), `operator_reply_first_60` (exactly 60
+  chars), `source: 'telegram'`.
+- **S8 — dispatcher triggered inline.** Within 2 s of the follow-up
+  creation, an `activities` row with `event_type='dispatcher_trigger'`
+  is written by `/api/dispatcher/trigger` (proving the bridge's
+  inline call reached the endpoint and Popen'd the heartbeat).
+- **S9 — backward compat.** Reply to a decision notification still
+  flips `ops_decisions.status='answered'` with the typed answer.
+  Reply to an inbox notification does not create a follow-up task.
+  Reply to a 🛑 RISK-GATED notification still flips the task to
+  `pending` and writes `task_risk_approved` (not
+  `task_followup_created`). None of those paths create an
+  `ops_tasks` row via the v0.6.4 surface.
+- **S10 — `/help`.** Reply still renders the existing usage card and
+  now mentions the task-complete follow-up pattern.
+- **NFR11 — malformed input.** Whitespace-only text is filtered by
+  the existing `_handle_message` guard before reply-to-msg routing
+  (no crash, no task). Very-long (5000-char) reply still creates a
+  task whose title is `Follow-up:` + 60 chars + `…`. The long-poll
+  loop does not raise.
+
+### Operator flow
+
+```bash
+cc restart                    # no migration this release; bridge restarts.
+# In Telegram:
+/run write release notes v2.4 to docs/release-notes-v2.4.md
+# Wait for ✅ task #42 done · Saved to docs/release-notes-v2.4.md (~8 sections)
+# Reply to that message with: now write the PR description from those notes
+# Bridge: ✅ task `#43` queued · follow-up to `#42`
+# Continue the chain — reply to the #43 completion with the next instruction.
+```
+
+### Tunables
+
+No new env vars. The 80 / 300 / 60 truncation thresholds are
+intentionally hard-coded — different operator preferences here is a
+v0.7+ concern, not Phase 2.
+
+### Not in this release (deferred)
+
+- **`parent_task_id` column** on `ops_tasks` for proper lineage
+  tracking. Context-in-description is sufficient for MVP; lineage
+  becomes useful only if TaskBoard gains a chain visualization
+  (v0.7+ UI work).
+- **Inherit `assigned_skill` from previous task** as an opt-in. The
+  current design lets `skill_router.py` re-pick based on the new
+  prompt. Operators who want skill continuity can still use
+  `SkillLauncher` for the follow-up. Defer until usage signals
+  demand it.
+- **Multi-hop chain visualization** in either Telegram or dashboard
+  UI. The description trails are sufficient for MVP.
+- **Quote-reply detection** that captures Telegram's `quote.text`
+  field separately from the operator's new text. Useful for chained
+  context but adds complexity; defer until concrete examples
+  demand it.
 
 ---
 

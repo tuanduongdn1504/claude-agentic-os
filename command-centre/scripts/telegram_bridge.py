@@ -702,6 +702,194 @@ def _handle_snooze(chat_id: Any, message_id: Any, decision_id: int,
 
 
 # ---------------------------------------------------------------------------
+# Follow-up task chaining — v0.6.4, Phase 2.
+# ---------------------------------------------------------------------------
+#
+# Reply-to-task-complete routing: operator replies to a ✅/❌ task_complete
+# notification with a follow-up instruction. Bridge fetches the previous
+# task, composes a new task with prev title + output_summary as context,
+# and dispatches as if the operator had typed `/run` with the fuller prompt.
+#
+# Mirrors mvp2's reply-to-RISK-GATED → /approve pattern: lookup via
+# _lookup_by_tg_message → call handler. Refuses on failed/cancelled prev
+# tasks (no useful summary to chain on, silent chaining would mislead) and
+# on deleted prev tasks (404).
+#
+# Multi-hop is natural: a follow-up's completion ping receives its own
+# /run-equivalent reply → description chain breaks at one level deep. The
+# Pattern Library lineage view is v0.7+ UI work and out of scope.
+
+_FOLLOWUP_PREV_TITLE_MAX = 80
+_FOLLOWUP_PREV_SUMMARY_MAX = 300
+_FOLLOWUP_NEW_TITLE_MAX = 60
+
+
+def _truncate_ellipsis(s: str, n: int) -> str:
+    """Trim `s` to `n` chars max, append '…' when truncation occurred."""
+    if not s:
+        return ""
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _fetch_prev_task(prev_task_id: int) -> Optional[dict]:
+    """Read prev task from ops_tasks directly. Read-only lookup — same
+    pattern as `_handle_snooze`'s ops_decisions query (no GET endpoint
+    exists for a single task; the bridge already imports `db`). Returns
+    None when the row is missing."""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, title, status, output_summary FROM ops_tasks WHERE id=?",
+            (prev_task_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+
+def _compose_followup_description(prev: dict, operator_reply: str) -> str:
+    """New task's `description`: prev context + `---` separator + reply.
+
+    Truncation rules per amendment:
+      - prev title: 80 chars + ellipsis if longer
+      - prev output_summary: 300 chars + ellipsis if longer; literal
+        '(no output summary recorded)' substitute when None / empty
+      - operator reply: not truncated locally (the dashboard /api/tasks
+        accepts the full body; TG's 3000-char body cap applies only
+        on the outbound send-side, not on POSTs to the dashboard)."""
+    prev_title = _truncate_ellipsis(prev.get("title") or "(untitled)",
+                                    _FOLLOWUP_PREV_TITLE_MAX)
+    raw_summary = (prev.get("output_summary") or "").strip()
+    if not raw_summary:
+        summary = "(no output summary recorded)"
+    else:
+        summary = _truncate_ellipsis(raw_summary, _FOLLOWUP_PREV_SUMMARY_MAX)
+    return (
+        f"Follow-up to task #{prev['id']} (\"{prev_title}\"):\n\n"
+        f"{summary}\n\n"
+        f"---\n\n"
+        f"{operator_reply}"
+    )
+
+
+def _compose_followup_title(operator_reply: str) -> str:
+    """Title surface for TaskBoard cards: `Follow-up: {first 60 chars}`,
+    ellipsis if longer. Newlines flattened so cards render one-line."""
+    flat = operator_reply.replace("\n", " ").strip()
+    return f"Follow-up: {_truncate_ellipsis(flat, _FOLLOWUP_NEW_TITLE_MAX)}"
+
+
+def _handle_task_followup(chat_id: Any, message_id: Any,
+                          prev_task_id: int, body: str) -> None:
+    """Reply-to-msg on a ✅/❌ task_complete notification → chain a new
+    task with the previous task's output as context.
+
+    Refuses on empty reply, deleted prev task (404), and prev status in
+    `('failed', 'cancelled')` — explicit reply, no state mutation. On
+    success: POST /api/tasks, INSERT activities row tagged
+    `event_type='task_followup_created'` (FR19), trigger dispatcher
+    inline via /api/dispatcher/trigger so the new task transitions
+    within ~1s, reply with the new task id.
+
+    NFR11: malformed input never crashes the long-poll loop — every
+    branch emits a reply and returns. Audit + dispatcher-trigger
+    failures log to stderr but do not block the operator reply (the
+    task is already created; dispatcher will pick it up on the next
+    120s heartbeat as the worst-case fallback)."""
+    reply_body = (body or "").strip()
+    if not reply_body:
+        _reply_text(chat_id, message_id,
+                    "cannot create follow-up from empty reply")
+        return
+
+    prev = _fetch_prev_task(prev_task_id)
+    if prev is None:
+        _reply_text(chat_id, message_id,
+                    f"task `#{prev_task_id}` not found — notification may "
+                    f"reference a deleted task")
+        return
+
+    status = (prev.get("status") or "").lower()
+    if status in ("failed", "cancelled"):
+        _reply_text(chat_id, message_id,
+                    f"task `#{prev_task_id}` {status} — chain on a "
+                    f"successful task or queue a fresh `/run`")
+        return
+
+    description = _compose_followup_description(prev, reply_body)
+    title = _compose_followup_title(reply_body)
+    prev_title_full = prev.get("title") or ""
+
+    try:
+        res = _http_post_json(
+            f"{DASHBOARD_URL}/api/tasks",
+            {
+                "title": title,
+                "description": description,
+                "execution_mode": "classic",
+                "priority": 0,
+                "quadrant": "do",
+                "risk_level": "low",
+                "requires_approval": False,
+                "dry_run": False,
+                "created_at_source": "telegram",
+            },
+        )
+    except Exception as exc:
+        code, body_err = _http_status_from_exc(exc)
+        safe_body = _md_safe(body_err) if body_err else ""
+        if code:
+            _reply_text(chat_id, message_id,
+                        f"⚠️ follow-up create failed · {code} · {safe_body}")
+        else:
+            _reply_text(chat_id, message_id,
+                        f"⚠️ follow-up create failed · {safe_body}")
+        return
+
+    new_task_id = res.get("id")
+    if not new_task_id:
+        _reply_text(chat_id, message_id,
+                    f"⚠️ follow-up create returned no id · {res}")
+        return
+
+    # Audit row — FR19, matches mvp2 + v0.6.2 audit-everything-from-
+    # Telegram pattern for state-changing commands. Best-effort: a DB
+    # failure here logs to stderr but does not block the dispatcher
+    # trigger or the operator reply (the task IS already created).
+    try:
+        with db.connect() as conn:
+            conn.execute(
+                "INSERT INTO activities(event_type, detail) "
+                "VALUES ('task_followup_created', ?)",
+                (json.dumps({
+                    "prev_task_id": prev_task_id,
+                    "new_task_id": new_task_id,
+                    "prev_title": prev_title_full,
+                    "operator_reply_first_60": reply_body[:60],
+                    "source": "telegram",
+                }),),
+            )
+    except Exception as exc:
+        print(f"[telegram] task_followup audit insert failed: {exc!r}",
+              file=sys.stderr)
+
+    # Inline dispatcher trigger — same pattern as v0.6.0's
+    # SkillLauncher.launch. POST returns immediately; the endpoint
+    # Popens `heartbeat.py --once` detached so the new task transitions
+    # to `running` within ~1s instead of waiting for the 120s heartbeat.
+    # Best-effort: trigger failure leaves the task pending until the
+    # next heartbeat cycle picks it up.
+    try:
+        _http_post_json(f"{DASHBOARD_URL}/api/dispatcher/trigger", {})
+    except Exception as exc:
+        print(f"[telegram] task_followup dispatcher trigger failed: {exc!r}",
+              file=sys.stderr)
+
+    _reply_text(chat_id, message_id,
+                f"✅ task `#{new_task_id}` queued · follow-up to "
+                f"`#{prev_task_id}`")
+
+
+# ---------------------------------------------------------------------------
 # /status — v0.6.1, Phase 2.
 # ---------------------------------------------------------------------------
 #
@@ -987,12 +1175,13 @@ def _handle_status(chat_id: Any) -> None:
 def _handle_message(msg: dict) -> None:
     """Process a single Telegram message — reply-to or slash-command.
 
-    Routing order (v0.5.0-mvp2 + v0.6.1 + v0.6.2):
+    Routing order (v0.5.0-mvp2 + v0.6.1 + v0.6.2 + v0.6.4):
       1. reply-to-message → lookup notification_log
          - decision  + body `/snooze [Nm|Nh|Nd]` → _handle_snooze  (v0.6.2)
          - decision  → POST /api/decisions/{id}/answer  (v0.3.0)
          - inbox     → POST /api/inbox/{id}/reply       (v0.3.0)
          - risk_gated → /approve <task_id>              (v0.5.0-mvp2, FR17)
+         - task_complete → _handle_task_followup        (v0.6.4)
       2. slash command
          - /status                  → _handle_status    (v0.6.1, Phase 2)
          - /answer | /reply         → existing route_reply (v0.3.0)
@@ -1025,6 +1214,21 @@ def _handle_message(msg: dict) -> None:
                 if event_type == "risk_gated":
                     try:
                         _handle_approve(chat, message_id, int(event_key))
+                    except (ValueError, TypeError):
+                        _reply_text(chat, message_id,
+                                    f"⚠️ bad task id in notification_log: {event_key!r}")
+                    return
+                # v0.6.4 — reply-to-msg on a ✅/❌ task_complete notification
+                # routes to _handle_task_followup, which chains a new task
+                # with the previous task's title + output_summary as
+                # context. Mirrors the risk_gated → /approve shape: lookup
+                # via _lookup_by_tg_message → dispatch. Refusal on
+                # failed/cancelled/deleted prev tasks lives inside the
+                # handler so the routing layer stays thin.
+                if event_type == "task_complete":
+                    try:
+                        _handle_task_followup(chat, message_id,
+                                              int(event_key), text)
                     except (ValueError, TypeError):
                         _reply_text(chat, message_id,
                                     f"⚠️ bad task id in notification_log: {event_key!r}")
@@ -1168,7 +1372,9 @@ def _handle_message(msg: dict) -> None:
                 "`/cancel <task_id>` — cancel a pending / risk-gated task\n"
                 "`/snooze <decision_id> [30m|2h|1d]` — suppress re-fire (default 30m, max 24h)\n\n"
                 "_Reply to a_ 🛑 _RISK-GATED notification with any text to approve._\n"
-                "_Reply to a_ ❓ _DECISION notification with_ `/snooze [duration]` _to defer it._"
+                "_Reply to a_ ❓ _DECISION notification with_ `/snooze [duration]` _to defer it._\n"
+                "_Reply to a_ ✅ _task-complete notification with a follow-up instruction "
+                "to chain a new task with the previous task's output as context._"
             ),
             "parse_mode": "Markdown",
         })
