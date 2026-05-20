@@ -15,7 +15,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Button } from '@/components/ui/Button';
 import { Input, Label, Select, Switch, Textarea } from '@/components/ui/Field';
 import { Badge } from '@/components/ui/Badge';
-import { useLaunchSkill, usePatchSkillPreset, useSkills } from '@/hooks/useQueries';
+import { useLaunchSkill, usePatchSkillBudget, usePatchSkillPreset, useSkills } from '@/hooks/useQueries';
 import type { SkillPreset, SkillRow, TaskMode, TaskQuadrant } from '@/lib/types';
 import { fmtAgeSeconds, fmtUsd } from '@/lib/format';
 import { cn } from '@/lib/cn';
@@ -25,6 +25,20 @@ const MODELS = ['', 'claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5'];
 const MODES: TaskMode[] = ['classic', 'stream'];
 const QUADRANTS: TaskQuadrant[] = ['do', 'schedule', 'delegate', 'archive'];
 const RISKS = ['low', 'medium', 'high'] as const;
+
+// v0.6.7 — derive the budget render tier. `null` budget hides the line
+// entirely (existing v0.6.6 layout). Thresholds: <0.8× dim, 0.8–1.0 amber,
+// ≥1.0 red + disable Launch.
+type BudgetTier = 'none' | 'dim' | 'amber' | 'red';
+function budgetTier(budget: number | null | undefined, today: number): BudgetTier {
+  if (budget == null) return 'none';
+  // Zero budget = operator temp-disabled; treat as red so the card shows
+  // the blocked state instead of an empty progress strip.
+  if (budget <= 0) return today > 0 || budget === 0 ? 'red' : 'none';
+  if (today >= budget) return 'red';
+  if (today >= budget * 0.8) return 'amber';
+  return 'dim';
+}
 
 function ageSeconds(iso: string | null): number | null {
   if (!iso) return null;
@@ -146,6 +160,18 @@ function SkillCard({
   const title = skill.preset?.title || `Run ${skill.name}`;
   const lastAge = ageSeconds(skill.last_launched_at);
   const avg = skill.avg_cost_usd_30d;
+  // v0.6.7 — budget state. Tier hides when budget is null (no migration shock
+  // for skills the operator hasn't touched). Red tier disables Launch with a
+  // tooltip showing exact today / budget values; matches the dispatcher's
+  // post-hoc refusal so the UI never claims a launch the dispatcher would
+  // reject.
+  const budget = skill.daily_budget_usd;
+  const today = skill.today_cost_usd ?? 0;
+  const tier = budgetTier(budget, today);
+  const atBudget = tier === 'red';
+  const budgetTooltip = budget != null
+    ? `Daily budget reached ($${today.toFixed(2)} / $${budget.toFixed(2)}) — resets at midnight local`
+    : '';
 
   return (
     <div className="group bg-surface/60 border border-border rounded-xl p-3 hover:border-border-glow transition-colors flex flex-col gap-2">
@@ -161,6 +187,23 @@ function SkillCard({
           <div className="text-text-subtle/70 mt-0.5">{skill.launch_count}× run</div>
         </div>
       </div>
+
+      {/* v0.6.7 — budget line. Hidden when daily_budget_usd is null. */}
+      {tier !== 'none' && budget != null && (
+        <div
+          className={cn(
+            'text-[11px] font-mono tabular-nums leading-tight',
+            tier === 'red'   && 'text-status-red',
+            tier === 'amber' && 'text-status-amber',
+            tier === 'dim'   && 'text-text-subtle',
+          )}
+          data-skill={skill.name}
+          data-budget-tier={tier}
+          title={tier === 'red' ? budgetTooltip : undefined}
+        >
+          today ${today.toFixed(2)} / ${budget.toFixed(2)}
+        </div>
+      )}
 
       <div className="flex items-center gap-2 mt-auto">
         <div className="text-[11px] text-text-subtle font-mono flex-1 min-w-0 truncate">
@@ -194,25 +237,28 @@ function SkillCard({
           <Pencil size={13} />
         </button>
 
-        <Button
-          size="sm"
-          variant="primary"
-          leftIcon={
-            launch.isPending
-              ? <motion.span
-                  animate={{ rotate: 360 }}
-                  transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}
-                  className="inline-block w-3 h-3 rounded-full border-2 border-white/60 border-t-transparent"
-                />
-              : <Play size={12} />
-          }
-          onClick={onLaunch}
-          disabled={launch.isPending}
-          data-skill={skill.name}
-          data-action="launch-skill"
-        >
-          {launch.isPending ? 'launching…' : 'launch'}
-        </Button>
+        <span title={atBudget ? budgetTooltip : undefined}>
+          <Button
+            size="sm"
+            variant="primary"
+            leftIcon={
+              launch.isPending
+                ? <motion.span
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 0.9, repeat: Infinity, ease: 'linear' }}
+                    className="inline-block w-3 h-3 rounded-full border-2 border-white/60 border-t-transparent"
+                  />
+                : <Play size={12} />
+            }
+            onClick={onLaunch}
+            disabled={launch.isPending || atBudget}
+            data-skill={skill.name}
+            data-action="launch-skill"
+            data-budget-blocked={atBudget ? '1' : undefined}
+          >
+            {launch.isPending ? 'launching…' : 'launch'}
+          </Button>
+        </span>
       </div>
 
       <AnimatePresence>
@@ -259,6 +305,10 @@ function SkillCard({
 
 function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void }) {
   const patch = usePatchSkillPreset();
+  // v0.6.7 — separate mutation. Budget is spending policy, not a launch
+  // default — saving the preset must NOT silently overwrite the budget and
+  // vice versa.
+  const patchBudget = usePatchSkillBudget();
   const p = skill.preset ?? {};
 
   const [title, setTitle] = useState(p.title ?? '');
@@ -272,6 +322,12 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
   );
   const [requiresApproval, setRequiresApproval] = useState<boolean>(!!p.requires_approval);
   const [dryRun, setDryRun] = useState<boolean>(!!p.dry_run);
+  // v0.6.7 — budget text input. Empty string = NULL (unlimited). The string
+  // form keeps the input controlled even when the field is blank.
+  const [budgetInput, setBudgetInput] = useState<string>(
+    skill.daily_budget_usd == null ? '' : String(skill.daily_budget_usd),
+  );
+  const [budgetError, setBudgetError] = useState<string | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -292,6 +348,21 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
 
   async function onSave(e: FormEvent) {
     e.preventDefault();
+    setBudgetError(null);
+    // v0.6.7 — parse the budget field. Empty string = NULL (clear). The
+    // server also validates, but local parse keeps the operator UX tight.
+    let budgetValue: number | null = null;
+    const trimmed = budgetInput.trim();
+    if (trimmed !== '') {
+      const parsed = Number(trimmed);
+      if (!isFinite(parsed) || parsed < 0) {
+        setBudgetError('Budget must be a non-negative number (blank = unlimited).');
+        return;
+      }
+      budgetValue = parsed;
+    }
+    const budgetChanged = (skill.daily_budget_usd ?? null) !== budgetValue;
+
     const preset: SkillPreset = {};
     if (title.trim()) preset.title = title.trim();
     if (description.trim()) preset.description = description.trim();
@@ -304,9 +375,14 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
     if (dryRun) preset.dry_run = true;
     try {
       await patch.mutateAsync({ name: skill.name, preset });
+      if (budgetChanged) {
+        await patchBudget.mutateAsync({
+          name: skill.name, daily_budget_usd: budgetValue,
+        });
+      }
       onClose();
     } catch {
-      /* error surfaces via patch.error below */
+      /* error surfaces via patch.error / patchBudget.error below */
     }
   }
 
@@ -421,9 +497,50 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
         />
       </div>
 
+      {/* v0.6.7 — budget section. Visually separated from preset launch-
+          defaults to signal a different concern: preset = launch defaults,
+          budget = spending policy. Blank = unlimited; 0 = block all claims
+          (operator temp-disable without delete). */}
+      <div
+        className="pt-2 mt-1 border-t border-border/60 space-y-1.5"
+        data-testid="preset-editor-budget"
+      >
+        <div className="flex items-center justify-between">
+          <Kicker>Budget (optional)</Kicker>
+          <div className="text-[10.5px] font-mono text-text-subtle">
+            today ${skill.today_cost_usd.toFixed(2)}
+          </div>
+        </div>
+        <Label>
+          <span className="text-[11px] text-text-dim">
+            Daily cap (USD) — dispatcher refuses claims once today’s api_pool spend
+            reaches this. Blank = unlimited; 0 blocks all claims.
+          </span>
+          <Input
+            type="number"
+            min={0}
+            step="0.01"
+            value={budgetInput}
+            onChange={e => setBudgetInput(e.target.value)}
+            placeholder="unlimited"
+            className="!h-8 !text-[12px]"
+            data-testid="preset-editor-budget-input"
+            data-skill={skill.name}
+          />
+        </Label>
+        {budgetError && (
+          <div className="text-[11px] text-status-red font-mono">{budgetError}</div>
+        )}
+      </div>
+
       {patch.error && (
         <div className="text-[11px] text-status-red bg-status-red/5 border border-status-red/20 rounded p-1.5 font-mono">
           {(patch.error as Error).message}
+        </div>
+      )}
+      {patchBudget.error && (
+        <div className="text-[11px] text-status-red bg-status-red/5 border border-status-red/20 rounded p-1.5 font-mono">
+          {(patchBudget.error as Error).message}
         </div>
       )}
 
@@ -441,9 +558,9 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
           <Button type="button" size="sm" variant="ghost" onClick={onClose}>cancel</Button>
           <Button
             type="submit" size="sm" variant="primary"
-            disabled={patch.isPending}
+            disabled={patch.isPending || patchBudget.isPending}
           >
-            {patch.isPending ? 'saving…' : 'save preset'}
+            {patch.isPending || patchBudget.isPending ? 'saving…' : 'save preset'}
           </Button>
         </div>
       </div>

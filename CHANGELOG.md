@@ -1,90 +1,231 @@
 # Changelog
 
-## v0.6.7 — DRAFT spec: per-skill daily cost budgets
+## v0.6.7 — per-skill daily cost budgets
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.7-amendment.md`,
-applied on top of current `main` HEAD (post v0.6.6).
+applied on top of current `main` HEAD (post v0.6.6). Largest multi-
+surface release since v0.6.0 — schema + dispatcher + API + UI +
+Telegram outbound + Playwright — but each surface mirrors an
+existing v0.2.0 (global cap) or v0.6.0 (api_pool semantics +
+SkillLauncher panel) pattern. Additive — no breaking changes to
+existing endpoints, idempotent migration, NULL-budget rows behave
+identically to v0.6.6.
 
-Adds a per-skill axis to spending discipline. Each `user_invocable=1`
-skill optionally gets `daily_budget_usd`; dispatcher refuses to claim
-tasks for that skill once today's `cost_source='api_pool'` spend
-reaches the budget. Composes with the global
-`MISSION_CONTROL_DAILY_COST_CAP_USD` cap from v0.2.0 — both apply,
-whichever triggers first wins.
-
-Multi-surface release (schema + dispatcher + API + UI + Telegram
-outbound) but each surface mirrors an existing v0.2.0 / v0.6.0
-pattern, so the risk is in breadth not novelty.
-
-Numbered `v0.6.7` (patch over v0.6.6) — pattern is a mechanical
-extension of the existing cap shape, not a new architecture
-concept. Alternative `v0.7.0` defensible for the multi-surface
-scope.
+Numbered `v0.6.7` (patch over v0.6.6). Cadence consistent with
+v0.6.1–v0.6.6. Alternative `v0.7.0` defensible (multi-surface
+feature with schema + dispatcher + UI changes); kept the patch
+cadence because the pattern is a mechanical extension of v0.2.0's
+existing cap shape, not a new architectural concept.
 
 ### Why this release
 
-Global cap is opaque about WHICH skill ate the budget. Per-skill
-budgets give the operator a clear signal — "morning-brief blocked
-at $0.85 today, deep-research still has $3.20 of its $5.00 budget"
-— instead of generic global-cap exhaustion. NULL = unlimited
-(current behaviour); 0 = blocked (disable without delete); positive
-= cap.
+`MISSION_CONTROL_DAILY_COST_CAP_USD` is a single number that
+protects the operator's total wallet but can't distinguish between
+an expensive deep-research skill burning $4/day legitimately and a
+misconfigured morning-brief skill burning $4/day by accident. When
+the global cap fires, the operator doesn't know which skill ate
+the budget. Per-skill budgets add a second axis — each
+`user_invocable=1` skill optionally gets a `daily_budget_usd`;
+dispatcher refuses to claim tasks for that skill once today's
+api_pool spend reaches the budget. Composes cleanly with the
+global cap: both apply, whichever triggers first wins. Skill
+budget is the per-skill axis, global cap is the safety floor.
 
-### What's planned
+### What ships
 
 - **`skills.daily_budget_usd REAL NULL`** column via additive
-  `_migrate_add_column`. Idempotent. NULL keeps every existing
-  skill behaving as today.
-- **`PATCH /api/skills/{name}/budget`** new endpoint (mirrors the
-  existing `PATCH .../autonomy` column-update precedent).
-- **`GET /api/skills`** augmented with `daily_budget_usd` +
-  `today_cost_usd` per row. Today's spend computed via the same
+  `_migrate_add_column` next to v0.6.0's `preset_json` /
+  `last_launched_at` / `launch_count`. Idempotent — re-running
+  `apply_migrations()` is a no-op. Three semantic values:
+  `NULL` = unlimited (current behaviour for every existing skill,
+  no migration shock); `0` = blocked, refuses every claim (operator
+  temp-disable without deleting); `> 0` = post-hoc cap.
+- **`PATCH /api/skills/{name}/budget`** new endpoint. Body
+  `{daily_budget_usd: float | null}`. `null` clears; `0` is valid;
+  negative numbers and non-numeric values are 400. Mirrors the
+  v0.6.0 `PATCH .../autonomy` shape exactly — column-update, no
+  JSON blob.
+- **`GET /api/skills`** rows now include `daily_budget_usd` and
+  `today_cost_usd` next to v0.6.0's `avg_cost_usd_30d`. Today's
+  spend uses the same
   `cost_source='api_pool' AND DATE(completed_at,'localtime')=today`
-  predicate the global cap uses (v0.6.0 cap rewrite).
-- **`GET /api/system/dispatcher`** augmented with
-  `skills_with_budget` + `skills_at_budget` counts for AttentionBar
-  + DispatcherStrip without N+1 fanout.
-- **Dispatcher pre-claim check** inserted between global cap and
-  per-task autonomy. Post-hoc (matches v0.2.0 shape — over-spend
-  by at most one task's cost). Logs
-  `dispatcher_skill_budget_capped` activity row.
+  predicate the global cap reads (v0.6.0 cap rewrite), so the
+  card-level math agrees with the dispatcher's refusal math down
+  to the cent.
+- **`GET /api/system/dispatcher`** gains two rollup fields —
+  `skills_with_budget` (count of non-NULL budgets) and
+  `skills_at_budget` (count where `today_cost_usd >= budget`).
+  AttentionBar and DispatcherStrip consume these instead of
+  fanning out one query per skill.
+- **Dispatcher pre-claim check** in `dispatcher.run_once()`,
+  inserted between the global cap (top-level early-return,
+  unchanged) and the per-task autonomy gate. Post-hoc shape —
+  matches the v0.2.0 global cap; refuses only when today's spend
+  already meets or exceeds the budget. Operator can over-spend by
+  at most one task's cost beyond the budget. When a claim is
+  refused: task reverts from `running` back to `pending`,
+  `stats.skill_budget_capped` increments, and an
+  `dispatcher_skill_budget_capped` activity row is logged with
+  full metadata (`{task_id, skill, today_cost_usd, daily_budget_usd}`).
+  Order of checks remains: emergency stop → stale PID sweep →
+  back-pressure → hard risk gate → global daily cap → **per-skill
+  budget (NEW)** → per-task autonomy.
 - **`/api/attention` aggregator** — new `skill_budget_capped` issue
-  type with `warning` severity (yellow, not red — operator-tuneable,
-  expected to trigger more often than global cap).
-- **SkillLauncher card** — 3-tier visual state: dim (under 0.8 ×
-  budget), amber (0.8 ≤ today < budget), red + disabled Launch
-  (today ≥ budget). Hidden when budget is NULL.
-- **Inline preset editor** — new "Budget (optional)" section with a
-  numeric input. Separate PATCH call from the preset blob to
-  signal different concerns (preset = launch defaults, budget =
-  spending policy).
-- **Telegram outbound `skill_budget_exceeded`** event type — first-
-  fire push per skill per day, dedupe key
-  `{skill_name}:{today_local_date}`. Format mirrors v0.5.0-mvp1
-  `_format_task_complete` shape.
+  type with `severity: "warning"` (yellow), NOT `error` (red).
+  Different from `cost_capped`: operator-tuneable, expected to
+  trigger more often. Single issue covers N capped skills with
+  `{count, skill, today_cost_usd, daily_budget_usd, title, message}`
+  — first skill's spend renders for context; `(+N more)` suffix
+  when more than one skill is over budget.
+- **`AttentionBar` rendering.** New `skill_budget_capped` case
+  renders the count + first skill's spend / budget. The whole
+  banner now tones to amber when only warning-severity issues are
+  present (preserves the existing red treatment when any `error`
+  issue — `failed_task`, `cost_capped` — sits in the feed).
+  Issues are sorted error-then-warning, keeping `cost_capped`
+  above `skill_budget_capped` per the amendment spec.
+- **`SkillLauncher` card 3-tier visual state.** Hidden entirely
+  when `daily_budget_usd` is `NULL` (v0.6.6 layout preserved). Dim
+  monospace `today $X.XX / $Y.YY` when `today < 0.8 × budget`;
+  amber when `0.8 × budget ≤ today < budget`; red + **Launch**
+  button disabled with a tooltip showing exact values
+  (`"Daily budget reached ($1.50 / $1.00) — resets at midnight
+  local"`) when `today ≥ budget`. Tier is derived in render code
+  from the GET /api/skills payload; no extra endpoint needed. The
+  red-tier `data-budget-blocked="1"` attribute and
+  `data-budget-tier` on the budget line are Playwright-stable.
+- **`SkillLauncher` inline preset editor — Budget (optional)
+  section** at the bottom of the form, visually separated from the
+  9 preset launch-default fields by a kicker, a divider, and a
+  trailing `today $X.XX` chip. Number input; blank = NULL
+  (unlimited). On save: preset goes through the existing
+  `PATCH .../preset` call, then a **separate**
+  `PATCH .../budget` call fires only if the budget changed —
+  matching the amendment's "preset = launch defaults, budget =
+  spending policy" carve-out so a preset edit never silently
+  rewrites the budget.
+- **Telegram outbound `skill_budget_exceeded` event type.** Fourth
+  poll source in `_outbound_tick`, sitting after task_complete and
+  risk_gated. First-fire push per skill per day; dedupe key is
+  `{skill_name}:{today_local_date}` (uses the v0.6.1 `_today_local_date`
+  helper) so the same skill same day stays silent, but tomorrow's
+  first exceed triggers a fresh notification on the rolled-over
+  date. `_format_skill_budget_exceeded` renders Markdown V1 in the
+  v0.5.0-mvp1 style:
+  > 🔒 **Skill budget reached**
+  >
+  > skill-name hit $1.50 / $1.00 today (HH:MM GMT+7).
+  >
+  > Dispatcher refusing new claims for this skill until midnight local.
+  > Other skills + manual /run tasks continue normally.
+- **`cc doctor`** gains `skill budgets` check: warns when any
+  skill has `daily_budget_usd < $0.01` (likely cents-vs-dollars
+  typo); green when every set budget is `>= $0.01`; skips on
+  pre-v0.6.7 databases.
 
 ### Schema delta
 
-One column, additive next to v0.6.0's `preset_json` /
-`last_launched_at` / `launch_count`:
+One additive column, idempotent against any v0.x install:
 
 | Table | Column | Type | Default |
 |---|---|---|---|
-| `skills` | `daily_budget_usd` | REAL | NULL |
+| `skills` | `daily_budget_usd` | REAL | `NULL` |
 
-Idempotent. NULL semantics preserved; existing skills unchanged.
+### Verified
 
-### Status
+- **Smoke harness** —
+  `command-centre/scripts/dev/smoke_v0_6_7.py` drives the 13
+  amendment stop conditions end-to-end against a real FastAPI
+  server and a real `dispatcher.run_once()` loop (claude-CLI spawn
+  stubbed for hermeticity, Telegram `_tg` stubbed for capture).
+  Seeds three fixture skills (no budget / under budget / over
+  budget) plus auxiliary `skill-zero` / `skill-unlimited` /
+  `skill-null` rows; asserts the migration is idempotent, the new
+  PATCH endpoint accepts valid payloads and rejects negative +
+  non-numeric inputs, the GET augmentation surfaces the new
+  fields, the dispatcher refuses at-budget and over-budget claims
+  while NULL budgets stay unlimited and zero budgets block
+  everything, the global cap still wins when both could trigger,
+  the Telegram dedupe fires first time and re-fires on the next
+  local day, the AttentionBar count drops the moment the operator
+  lifts one skill's budget, the 3-tier derivation lines up with
+  the API values, every existing v0.6.6 skill field stays present
+  with the same semantics, and `cc doctor`'s new check warns on a
+  sub-cent budget. **35 / 35 checks pass.**
+- **Playwright** —
+  `command-centre/ui/tests/e2e/v0.6.7.spec.ts` exercises the UI
+  surfaces against `page.route` fixtures (no real backend
+  required): four-skill grid renders dim / amber / red / hidden
+  tiers correctly; Launch button is disabled with
+  `data-budget-blocked="1"` only on the red tier; AttentionBar
+  tones to amber when only `skill_budget_capped` (warning) issues
+  are present; AttentionBar keeps the skill row visible and
+  ordered below `cost_capped` (error) when both fire at once.
+- `tsc --noEmit` clean. `vite build` 531 KB / 158 KB gzipped.
+- `python3 -m py_compile` clean across all touched Python files.
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+### Operator flow
 
-Estimate: ~3-4h. Largest scope since v0.6.0 because of multi-surface
-breadth (schema + dispatcher + UI + Telegram + Playwright). All
-surfaces mirror proven patterns.
+```bash
+# Existing v0.6.x install — just restart, migration runs in lifespan.
+cc restart
+cc doctor                  # `skill budgets` should be ok or skip
+
+# Set a budget through the UI:
+#   open http://127.0.0.1:8765
+#   Skill launcher → pencil icon on a card
+#   scroll to the new "Budget (optional)" section at the bottom
+#   enter a number (or 0 to temp-disable; blank to clear)
+#   save preset
+
+# Or via curl:
+curl -X PATCH http://127.0.0.1:8765/api/skills/morning-brief/budget \
+     -H 'Content-Type: application/json' \
+     -d '{"daily_budget_usd": 0.50}'
+```
+
+When today's api_pool spend on that skill reaches the budget:
+
+1. The dispatcher refuses to claim new tasks for the skill and
+   logs `dispatcher_skill_budget_capped`.
+2. The SkillLauncher card flips red, **Launch** disables with a
+   tooltip, and the AttentionBar surfaces a `skill_budget_capped`
+   warning.
+3. Telegram (if configured) pushes a one-time
+   🔒 *Skill budget reached* message — dedupes within the same
+   local day, re-fires after midnight if the operator hasn't
+   lifted the budget.
+
+### Tunables (env vars or .env)
+
+No new env vars. The new policy lives entirely on the per-skill
+column.
+
+| Var | Default | Behaviour in v0.6.7 |
+|---|---|---|
+| `MISSION_CONTROL_DAILY_COST_CAP_USD` | unset = off | Unchanged. Global safety floor; fires before the per-skill check. |
+| `TELEGRAM_NOTIFY_INTERVAL_S` | 30 | Unchanged. Sets the cadence at which `skill_budget_exceeded` polls. |
+
+### Not in this release (deferred)
+
+- **Per-account-per-skill budgets.** v0.6.3 added the `account_id`
+  axis; combining "skill X has $5/day for account_a but $20/day
+  for account_b" is a v0.7+ matrix concept. v0.6.7 sums across
+  all accounts for the skill.
+- **Soft-warning + hard-cap pair** (two budgets per skill). v0.6.7
+  uses a single hard cap + 80% amber threshold. Two-tier policies
+  add config surface; defer until usage demands.
+- **Budget templates / classes** ("deep-research skills get $5,
+  brief skills get $0.50"). Operator can set per-skill manually;
+  templates are syntactic sugar.
+- **Non-daily time windows** (weekly, monthly). MVP is daily-only.
+- **Preemptive hard-reject** (refuse a task that would push *over*
+  the budget, not at-budget). Would need per-task cost estimation;
+  speculative. v0.6.7 matches the v0.2.0 post-hoc cap shape.
+- **`cc setup skill-budgets` wizard.** Operator sets budgets via
+  the SkillLauncher inline editor; a wizard for bulk setup is
+  v0.7+ if signals support.
 
 ---
 

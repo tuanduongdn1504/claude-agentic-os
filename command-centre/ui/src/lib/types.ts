@@ -218,6 +218,11 @@ export interface SkillRow {
   last_launched_at: string | null;
   launch_count: number;
   avg_cost_usd_30d: number | null;
+  // v0.6.7 — per-skill daily budget. `null` = unlimited; `0` = blocked;
+  // `>0` = post-hoc cap. `today_cost_usd` is the api_pool spend assigned
+  // to this skill that has completed today (local).
+  daily_budget_usd: number | null;
+  today_cost_usd: number;
 }
 export interface SkillsList { items: SkillRow[]; count: number; }
 export interface SkillEconomicsRow {
@@ -304,6 +309,9 @@ export interface DispatcherState {
   cost_capped: boolean;
   hard_risk_gate: boolean;
   risk_gated_today: number;
+  // v0.6.7 — per-skill daily budget rollup.
+  skills_with_budget: number;
+  skills_at_budget: number;
 }
 
 // -- Sparklines + heatmap --

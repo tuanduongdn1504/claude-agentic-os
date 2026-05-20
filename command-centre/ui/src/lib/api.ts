@@ -109,6 +109,15 @@ export const patchSkillPreset = (name: string, preset: SkillPreset | null) =>
     body: JSON.stringify(preset),
   });
 
+// v0.6.7 — per-skill daily budget. Separate endpoint from preset because
+// budget is spending policy, not a launch default. Pass `null` to clear.
+export const patchSkillBudget = (name: string, daily_budget_usd: number | null) =>
+  j<SkillRow>(`/api/skills/${encodeURIComponent(name)}/budget`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ daily_budget_usd }),
+  });
+
 export const launchSkill = (name: string, opts: { description_override?: string } = {}) =>
   j<{ task_id: number; status: string; skill: string }>(
     `/api/skills/${encodeURIComponent(name)}/launch`,

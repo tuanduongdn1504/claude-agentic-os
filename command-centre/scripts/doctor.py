@@ -199,6 +199,45 @@ def chk_cost_source_backfill() -> Result:
     )
 
 
+def chk_skill_budgets() -> Result:
+    """v0.6.7 — warn on suspiciously low per-skill budgets (likely typo:
+    operator typed cents not dollars). Skips when the column hasn't migrated
+    yet so doctor stays green on pre-v0.6.7 databases."""
+    import sqlite3
+    from pathlib import Path as _P
+    install_dir = _P(os.environ.get("CC_INSTALL_DIR") or
+                     _P(__file__).resolve().parent.parent)
+    db_path = install_dir / "data" / "command-centre.db"
+    if not db_path.exists():
+        return Result("skip", "DB not initialised yet")
+    try:
+        conn = sqlite3.connect(db_path)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(skills)")}
+        if "daily_budget_usd" not in cols:
+            conn.close()
+            return Result("skip", "skills.daily_budget_usd missing — pre-v0.6.7 schema")
+        rows = conn.execute(
+            "SELECT name, daily_budget_usd FROM skills "
+            "WHERE daily_budget_usd IS NOT NULL "
+            "  AND daily_budget_usd > 0 AND daily_budget_usd < 0.01"
+        ).fetchall()
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM skills WHERE daily_budget_usd IS NOT NULL"
+        ).fetchone()[0])
+        conn.close()
+    except Exception as exc:
+        return Result("error", f"db probe failed: {exc}")
+    if rows:
+        names = ", ".join(r[0] for r in rows[:3])
+        more = "" if len(rows) <= 3 else f" (+{len(rows) - 3} more)"
+        return Result(
+            "warn",
+            f"{len(rows)} skill(s) with daily_budget_usd < $0.01 — likely typo "
+            f"(cents-vs-dollars): {names}{more}",
+        )
+    return Result("ok", f"{total} skill budget(s) set; none below $0.01")
+
+
 def chk_telegram() -> Result:
     tok = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not tok:
@@ -232,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         Check("dashboard port",   lambda: chk_port_open(args.host, args.port), critical=True),
         Check("system health",    lambda: chk_system_health(base), critical=True),
         Check("cost_source backfill", chk_cost_source_backfill, critical=False),
+        Check("skill budgets",    chk_skill_budgets, critical=False),
         Check("launchd · mc",     lambda: chk_launchctl("com.commandcentre.mission-control"), critical=False),
         Check("launchd · telegram", lambda: chk_launchctl("com.commandcentre.telegram-bot"), critical=False),
         Check("telegram",         chk_telegram, critical=False),

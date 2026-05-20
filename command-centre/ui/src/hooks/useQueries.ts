@@ -179,6 +179,20 @@ export function usePatchSkillPreset() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['skills'] }),
   });
 }
+// v0.6.7 — per-skill daily budget mutation. Separate from preset because
+// budget is spending policy, not a launch default.
+export function usePatchSkillBudget() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; daily_budget_usd: number | null }) =>
+      api.patchSkillBudget(args.name, args.daily_budget_usd),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['skills'] });
+      qc.invalidateQueries({ queryKey: ['dispatcher-state'] });
+      qc.invalidateQueries({ queryKey: ['attention'] });
+    },
+  });
+}
 export function useLaunchSkill() {
   const qc = useQueryClient();
   return useMutation({

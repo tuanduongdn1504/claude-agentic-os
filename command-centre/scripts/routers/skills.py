@@ -92,6 +92,24 @@ def _avg_cost_30d(conn, name: str) -> float | None:
     return round(float(row["avg"]), 6)
 
 
+def _today_cost_usd(conn, name: str) -> float:
+    """Sum of api_pool cost for this skill, completed today (local). Mirrors
+    the dispatcher's global-cap predicate so /api/skills + dispatcher math
+    stay aligned. Always returns a number — 0.0 when nothing has completed."""
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(cost_usd), 0) AS s
+        FROM ops_tasks
+        WHERE assigned_skill = ?
+          AND cost_source = 'api_pool'
+          AND cost_usd IS NOT NULL
+          AND DATE(completed_at, 'localtime') = DATE('now', 'localtime')
+        """,
+        (name,),
+    ).fetchone()
+    return round(float(row["s"]) if row and row["s"] is not None else 0.0, 6)
+
+
 @router.get("/api/skills")
 async def list_skills(environment: Optional[str] = None,
                       user_invocable: Optional[int] = None) -> dict[str, Any]:
@@ -107,7 +125,8 @@ async def list_skills(environment: Optional[str] = None,
             SELECT name, environment, description, path, autonomy_level,
                    user_invocable, script_count, last_modified,
                    preset_json, last_launched_at,
-                   COALESCE(launch_count, 0) AS launch_count
+                   COALESCE(launch_count, 0) AS launch_count,
+                   daily_budget_usd
             FROM skills
             WHERE {' AND '.join(clauses)}
             ORDER BY environment, name
@@ -119,6 +138,7 @@ async def list_skills(environment: Optional[str] = None,
             d = dict(r)
             d["preset"] = _parse_preset_json(d.pop("preset_json", None))
             d["avg_cost_usd_30d"] = _avg_cost_30d(conn, d["name"])
+            d["today_cost_usd"] = _today_cost_usd(conn, d["name"])
             items.append(d)
     return {"items": items, "count": len(items)}
 
@@ -168,6 +188,44 @@ async def skills_autonomy(name: str, request: Request) -> dict[str, Any]:
     return {"updated": True, "name": name, "autonomy_level": level}
 
 
+@router.patch("/api/skills/{name}/budget")
+async def skills_budget(name: str, request: Request) -> dict[str, Any]:
+    """v0.6.7 — set or clear the per-skill daily cost budget.
+
+    Body: `{"daily_budget_usd": float | null}`. `null` clears (unlimited);
+    `0` is valid and blocks all claims until the operator lifts it; negative
+    numbers and non-numeric values are 400. Mirrors PATCH .../autonomy as
+    the column-update endpoint pattern (no JSON blob)."""
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(400, "request body required (use null to clear)")
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        raise HTTPException(400, "body must be JSON")
+    if not isinstance(payload, dict) or "daily_budget_usd" not in payload:
+        raise HTTPException(400, "body must include 'daily_budget_usd'")
+
+    value = payload["daily_budget_usd"]
+    if value is None:
+        stored: float | None = None
+    else:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HTTPException(400, "daily_budget_usd must be a number or null")
+        if value < 0:
+            raise HTTPException(400, "daily_budget_usd must be >= 0 (or null to clear)")
+        stored = float(value)
+
+    with db.connect() as conn:
+        rc = conn.execute(
+            "UPDATE skills SET daily_budget_usd = ? WHERE name = ?",
+            (stored, name),
+        ).rowcount
+        if rc == 0:
+            raise HTTPException(404, "skill not found")
+        return _skill_row(conn, name)
+
+
 # ---------------------------------------------------------------------------
 # v0.6.0 — preset editor + launcher
 # ---------------------------------------------------------------------------
@@ -178,7 +236,8 @@ def _skill_row(conn, name: str) -> dict[str, Any]:
         SELECT name, environment, description, path, autonomy_level,
                user_invocable, script_count, last_modified,
                preset_json, last_launched_at,
-               COALESCE(launch_count, 0) AS launch_count
+               COALESCE(launch_count, 0) AS launch_count,
+               daily_budget_usd
         FROM skills WHERE name = ?
         """,
         (name,),
@@ -188,6 +247,7 @@ def _skill_row(conn, name: str) -> dict[str, Any]:
     d = dict(row)
     d["preset"] = _parse_preset_json(d.pop("preset_json", None))
     d["avg_cost_usd_30d"] = _avg_cost_30d(conn, name)
+    d["today_cost_usd"] = _today_cost_usd(conn, name)
     return d
 
 

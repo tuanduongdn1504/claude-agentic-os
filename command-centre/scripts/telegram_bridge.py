@@ -271,6 +271,23 @@ def _format_task_complete(t: dict) -> str:
     return header + body + extra
 
 
+def _format_skill_budget_exceeded(skill: dict) -> str:
+    """v0.6.7 — first-fire per skill per day push for budget exhaustion.
+
+    Markdown V1; skill name is operator-controllable so flow it through
+    `_md_safe` to keep the parser happy when names contain underscores."""
+    name = _md_safe((skill.get("name") or "(unnamed)")[:120])
+    today = float(skill.get("today_cost_usd") or 0)
+    budget = float(skill.get("daily_budget_usd") or 0)
+    ts = _now_local_str()
+    return (
+        f"🔒 *Skill budget reached*\n\n"
+        f"{name} hit ${today:.2f} / ${budget:.2f} today ({ts}).\n\n"
+        f"Dispatcher refusing new claims for this skill until midnight local. "
+        f"Other skills + manual /run tasks continue normally."
+    )
+
+
 def _format_risk_gated(t: dict) -> str:
     """Format a risk-gated task (status=awaiting_approval) for Telegram."""
     title = _md_safe((t.get("title") or "(untitled)")[:200])
@@ -284,7 +301,10 @@ def _format_risk_gated(t: dict) -> str:
 
 
 def _outbound_tick() -> dict:
-    sent = {"decisions": 0, "inbox": 0, "task_complete": 0, "risk_gated": 0, "errors": 0}
+    sent = {
+        "decisions": 0, "inbox": 0, "task_complete": 0, "risk_gated": 0,
+        "skill_budget_exceeded": 0, "errors": 0,
+    }
     # Decisions.
     try:
         ds = _http_get_json(f"{DASHBOARD_URL}/api/decisions?status=pending")
@@ -366,6 +386,34 @@ def _outbound_tick() -> dict:
         sent["errors"] += 1
         print(f"[telegram] /api/tasks?status=awaiting_approval fetch failed: {exc!r}", file=sys.stderr)
 
+    # v0.6.7 — skill budget exhaustion. First-fire push per skill per local
+    # day. Dedupe key embeds today's local date so tomorrow's first exceed
+    # triggers a fresh notification when the budget rolls over.
+    try:
+        skill_caps = _http_get_json(f"{DASHBOARD_URL}/api/skills")
+        today_local = _today_local_date()
+        for skill in skill_caps.get("items", []):
+            budget = skill.get("daily_budget_usd")
+            today = float(skill.get("today_cost_usd") or 0)
+            if budget is None:
+                continue
+            if today < float(budget):
+                continue
+            event_key = f"{skill.get('name','?')}:{today_local}"
+            if _already_notified("skill_budget_exceeded", event_key):
+                continue
+            try:
+                mid = _send_message(_format_skill_budget_exceeded(skill))
+                if mid:
+                    _record_notify("skill_budget_exceeded", event_key, str(mid))
+                    sent["skill_budget_exceeded"] += 1
+            except Exception as exc:
+                sent["errors"] += 1
+                print(f"[telegram] skill_budget_exceeded notify failed: {exc!r}", file=sys.stderr)
+    except Exception as exc:
+        sent["errors"] += 1
+        print(f"[telegram] /api/skills fetch failed: {exc!r}", file=sys.stderr)
+
     return sent
 
 
@@ -373,10 +421,14 @@ def _outbound_loop() -> None:
     while not _STOP.is_set():
         try:
             stats = _outbound_tick()
-            if any(stats[k] for k in ("decisions", "inbox", "task_complete", "risk_gated")):
+            if any(stats[k] for k in (
+                "decisions", "inbox", "task_complete", "risk_gated",
+                "skill_budget_exceeded",
+            )):
                 print(
                     f"[telegram] notified d={stats['decisions']} i={stats['inbox']} "
                     f"tc={stats['task_complete']} rg={stats['risk_gated']} "
+                    f"sb={stats['skill_budget_exceeded']} "
                     f"err={stats['errors']}",
                     flush=True,
                 )

@@ -398,6 +398,10 @@ def apply_migrations() -> None:
             "CREATE INDEX IF NOT EXISTS idx_sessions_account "
             "ON sessions(account_id)"
         )
+        # v0.6.7 — per-skill daily cost budget. NULL = unlimited (default for
+        # every existing skill); 0 = blocks all claims (operator temp-disable);
+        # > 0 = post-hoc cap matching the v0.2.0 / v0.6.0 global cap shape.
+        _migrate_add_column(conn, "skills", "daily_budget_usd", "REAL")
 
 
 # ---------------------------------------------------------------------------

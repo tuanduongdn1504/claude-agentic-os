@@ -185,6 +185,32 @@ def _skill_autonomy(skill_name: str | None) -> str:
     return (row["autonomy_level"] if row else "auto") or "auto"
 
 
+# v0.6.7 — per-skill daily cost budget. Returns (budget, today_spend) where
+# `budget is None` means no cap is set. Post-hoc shape matches the global cap:
+# we refuse when `today_spend >= budget`, never preemptive.
+def _skill_budget_state(skill_name: str | None) -> tuple[float | None, float]:
+    if not skill_name:
+        return None, 0.0
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT daily_budget_usd FROM skills WHERE name = ?", (skill_name,)
+        ).fetchone()
+        if not row or row["daily_budget_usd"] is None:
+            return None, 0.0
+        spend_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(cost_usd), 0) AS s
+            FROM ops_tasks
+            WHERE assigned_skill = ?
+              AND cost_source = 'api_pool'
+              AND cost_usd IS NOT NULL
+              AND DATE(completed_at, 'localtime') = DATE('now', 'localtime')
+            """,
+            (skill_name,),
+        ).fetchone()
+    return float(row["daily_budget_usd"]), float(spend_row["s"] if spend_row else 0.0)
+
+
 # -- DECISION: / INBOX: fence-aware scanner -----------------------------
 
 FENCE_RE = re.compile(r"^\s*```")
@@ -510,6 +536,7 @@ def run_once(verbose: bool = False) -> dict[str, int]:
         "claimed": 0, "auto": 0, "promoted_for_approval": 0,
         "succeeded": 0, "failed": 0, "swept_pids": 0,
         "risk_gated": 0, "back_pressure": 0, "cost_capped": 0,
+        "skill_budget_capped": 0,
     }
     stats["swept_pids"] = _sweep_stale_pids()
 
@@ -590,6 +617,33 @@ def run_once(verbose: bool = False) -> dict[str, int]:
             if picked:
                 task["assigned_skill"] = picked
                 task_tracker.update_task(task["id"], assigned_skill=picked)
+
+        # Guard 4 (v0.6.7): per-skill daily budget. Refuse to dispatch when
+        # today's api_pool spend for this skill already meets the budget. Post-
+        # hoc shape — matches the global cap; operator can over-spend by at
+        # most one task's cost beyond the budget. NULL budget = unlimited.
+        if task.get("assigned_skill"):
+            budget, today_spend = _skill_budget_state(task["assigned_skill"])
+            if budget is not None and today_spend >= budget:
+                task_tracker.update_task(task["id"], status="pending", started_at=None)
+                stats["skill_budget_capped"] += 1
+                task_tracker.log_activity(
+                    "dispatcher_skill_budget_capped",
+                    f"skill={task['assigned_skill']} "
+                    f"today=${today_spend:.4f} budget=${budget:.2f}",
+                    metadata={
+                        "task_id": task["id"],
+                        "skill": task["assigned_skill"],
+                        "today_cost_usd": today_spend,
+                        "daily_budget_usd": budget,
+                    },
+                )
+                if verbose:
+                    print(
+                        f"[dispatcher] skill-budget-capped: {task['assigned_skill']} "
+                        f"${today_spend:.4f} ≥ ${budget:.2f}"
+                    )
+                continue
 
         # Autonomy gate.
         autonomy = _skill_autonomy(task.get("assigned_skill"))

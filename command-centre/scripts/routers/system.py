@@ -245,6 +245,25 @@ async def system_dispatcher() -> dict[str, Any]:
               AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
             """
         ).fetchone()["n"])
+        # v0.6.7 — per-skill budget health-summary. UI uses these so the
+        # AttentionBar + DispatcherStrip don't fan out one query per skill.
+        skills_with_budget = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM skills WHERE daily_budget_usd IS NOT NULL"
+        ).fetchone()["n"])
+        skills_at_budget = int(conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM skills s
+            WHERE s.daily_budget_usd IS NOT NULL
+              AND (
+                SELECT COALESCE(SUM(cost_usd), 0)
+                FROM ops_tasks
+                WHERE assigned_skill = s.name
+                  AND cost_source = 'api_pool'
+                  AND cost_usd IS NOT NULL
+                  AND DATE(completed_at, 'localtime') = DATE('now', 'localtime')
+              ) >= s.daily_budget_usd
+            """
+        ).fetchone()["n"])
 
     by_src = {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0}
     for r in cost_rows:
@@ -272,6 +291,8 @@ async def system_dispatcher() -> dict[str, Any]:
         "cost_capped": cost_capped,
         "hard_risk_gate": hard_risk_gate,
         "risk_gated_today": risk_gated_today,
+        "skills_with_budget": skills_with_budget,
+        "skills_at_budget": skills_at_budget,
     }
 
 
@@ -467,6 +488,49 @@ async def attention() -> dict[str, Any]:
                         f"${cap:.2f} today). Max-sub usage continues."
                     ),
                 })
+
+        # v0.6.7 — per-skill daily budget. Severity `warning` (yellow), NOT
+        # `error` — operator-tuneable and expected to trigger more often than
+        # the global cap. One issue covers N capped skills; UI surfaces the
+        # count + first skill's spend / budget for context.
+        capped_rows = conn.execute(
+            """
+            SELECT s.name AS name, s.daily_budget_usd AS budget,
+                   COALESCE((
+                     SELECT SUM(cost_usd) FROM ops_tasks
+                     WHERE assigned_skill = s.name
+                       AND cost_source = 'api_pool'
+                       AND cost_usd IS NOT NULL
+                       AND DATE(completed_at, 'localtime')
+                           = DATE('now', 'localtime')
+                   ), 0) AS today_cost
+            FROM skills s
+            WHERE s.daily_budget_usd IS NOT NULL
+            ORDER BY s.name
+            """
+        ).fetchall()
+        capped = [r for r in capped_rows
+                  if float(r["today_cost"]) >= float(r["budget"])]
+        if capped:
+            first = capped[0]
+            first_name = str(first["name"])
+            first_today = float(first["today_cost"])
+            first_budget = float(first["budget"])
+            n = len(capped)
+            issues.append({
+                "kind": "skill_budget_capped",
+                "severity": "warning",
+                "count": n,
+                "skill": first_name,
+                "today_cost_usd": first_today,
+                "daily_budget_usd": first_budget,
+                "title": f"{n} skill{'s' if n != 1 else ''} at daily budget",
+                "message": (
+                    f"{first_name} blocked at ${first_today:.2f} / "
+                    f"${first_budget:.2f}"
+                    + (f" (+{n - 1} more)" if n > 1 else "")
+                ),
+            })
 
     return {"issues": issues, "count": len(issues)}
 
