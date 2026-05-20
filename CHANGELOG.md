@@ -1,5 +1,74 @@
 # Changelog
 
+## v0.6.6 — DRAFT spec: Obsidian embed mode (`?embed=1`)
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.6-amendment.md`,
+applied on top of current `main` HEAD (post v0.6.5).
+
+UI/routing change — first non-Telegram release since v0.6.0. Closes
+the loop on this arc's original framing (Chase AI's Obsidian
+command-centre video) without shipping an Obsidian companion plugin:
+just strip dashboard chrome when `?embed=1` query param is set, so
+operators can paste the URL into Obsidian's web-viewer plugin and
+get the dashboard rendered next to their notes.
+
+Numbered `v0.6.6` (patch over v0.6.5). Alternative `v0.7.0`
+defensible (first product-surface expansion since v0.6.0).
+Recommendation: `v0.6.6` keeps the v0.6.x patch cadence; override
+at build time if minor-bump preferred.
+
+### Why this release
+
+Dashboard is currently a standalone localhost web app — operators
+who run Obsidian as their daily knowledge base have to context-
+switch between vault and browser tab. `?embed=1` is the minimum-
+viable bridge: dashboard stays standalone, but operators who want
+eye-level co-presence install Obsidian's web-viewer plugin and
+paste the embed URL. No Obsidian SDK, no plugin manifest, no
+custom integration burden.
+
+### What's planned
+
+- **`?embed=1` query param** detected in `AppShell.tsx` via
+  TanStack Router's `useSearch`. Conditional render hides `Nav`,
+  `Header`, `CommandPalette`, `EmergencyStopBanner` when set;
+  `<Outlet />` content + `AttentionBar` (rendered inside pages,
+  not AppShell) stay visible.
+- **Embed-mode CSS** — tighter padding (16px vs 24-32px), optional
+  smaller font at narrow widths (<600px), tighter card spacing.
+- **Internal link preservation** — every `<Link>` in panels gets
+  `search={(prev) => prev}` so navigation between pages keeps the
+  `embed=1` flag. Operator stays in embed mode without manual
+  re-pasting.
+- **Backend X-Frame audit** — verify no `X-Frame-Options: DENY` is
+  sent; add CSP `frame-ancestors` allowlist optionally (deferred
+  to v0.7+ if real Obsidian testing needed).
+- **README section** — install web-viewer plugin, paste embed URL,
+  pin pane. Documents the EmergencyStopBanner-hidden trade-off
+  explicitly (operator opens dashboard outside Obsidian for
+  emergencies).
+- **Playwright spec** covering 4 cases: embed hides chrome, no-embed
+  renders full chrome, navigation preserves flag, AttentionBar
+  visible in embed.
+
+### Schema delta
+
+None. Frontend + 1 backend header audit, no data layer changes.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: ~2-3h. UI surface + manual Obsidian smoke + Playwright;
+larger than v0.6.5 (~1h) but smaller than v0.6.0 / v0.6.3 (no
+schema, no new endpoints, no operator config).
+
+---
+
 ## v0.6.5 — Telegram `/yes <id>` + `/no <id>` slash commands
 
 Built against the amendment in
