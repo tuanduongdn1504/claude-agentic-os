@@ -1,5 +1,74 @@
 # Changelog
 
+## v0.6.4 — DRAFT spec: Telegram reply-to-task-complete → follow-up `/run`
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.4-amendment.md`,
+applied on top of current `main` HEAD (post v0.6.3).
+
+Third Phase 2 feature from the Telegram Remote Trigger PRD. Bridge-
+only — single file change to `telegram_bridge.py` plus this CHANGELOG
+entry. No schema changes, no new endpoints, no breaking changes.
+
+Numbered `v0.6.4` (patch over v0.6.3) — same Telegram-bridge
+subsystem, cadence consistent with v0.6.1 / v0.6.2 / v0.6.3.
+
+### Why this release
+
+Today `/run` launches one task. Chaining workflows means retyping
+context — `✅ task #42 done · Saved to docs/release-notes-v2.4.md`
+followed by `/run write PR description from those notes` is two
+disconnected operations. v0.6.4 collapses that to one: reply to the
+task-complete notification with the follow-up instruction; bridge
+composes a new task with the previous task's title + output summary
+as context, dispatched immediately.
+
+Closes Journey 1 deeper — "EAS build wait" becomes
+"EAS build wait → chain three tasks from phone while waiting" instead
+of "one task per build wait."
+
+### What's planned
+
+- **Reply-to-task-complete routing.** Extend `_lookup_by_tg_message`
+  (mvp2) to recognise `event_type='task_complete'` replies, route to
+  `_handle_task_followup`. Mirror of mvp2's
+  reply-to-RISK-GATED → `/approve` pattern.
+- **`_handle_task_followup(chat_id, prev_task_id, body)`** —
+  fetch prev task via `GET /api/tasks/{id}`, refuse on
+  `status in ('failed', 'cancelled')`, compose new task description
+  with prev title (truncated 80 chars) + prev output_summary
+  (truncated 300 chars) + `---` separator + operator's reply,
+  `POST /api/tasks` with `created_at_source='telegram'`, trigger
+  dispatcher inline (no 120s wait), audit-log to `activities` with
+  `event_type='task_followup_created'`, `source='telegram'`, reply
+  with new task ID.
+- **`/help` text** extended with the new pattern.
+- **Title composition:** `Follow-up: {operator_reply[:60]}` so
+  TaskBoard cards stay readable.
+- **No skill inheritance** — let dispatcher's `skill_router.py`
+  re-pick based on the new prompt. Operators wanting skill
+  continuity use `SkillLauncher` for the follow-up explicitly.
+- **No `parent_task_id` schema column** — context lives in the
+  description text. Lineage tracking is a v0.7+ UI concern.
+
+### Schema delta
+
+None. All composition lives in the new task's `description` field;
+no new columns, no new endpoints.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: ~1.5-2h. Larger than v0.6.2 (composition + failure
+handling + multi-hop smoke), smaller than v0.6.1 / v0.6.3 (no
+schema, no operator config docs).
+
+---
+
 ## v0.6.3 — multi-account port + FSEvents opt-in + wip cleanup
 
 Built against the amendment in
