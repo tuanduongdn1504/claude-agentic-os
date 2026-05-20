@@ -1,5 +1,72 @@
 # Changelog
 
+## v0.6.5 — DRAFT spec: Telegram `/yes <id>` + `/no <id>` slash commands
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.5-amendment.md`,
+applied on top of current `main` HEAD (post v0.6.4).
+
+Fourth Phase 2 feature from the Telegram Remote Trigger PRD —
+no-heuristic alternative to the deferred inline keyboard
+`[Yes] [No]`. Bridge-only — single file change to
+`telegram_bridge.py` plus this CHANGELOG entry. No schema changes,
+no new endpoints, no breaking changes. Smallest scope in the
+v0.6.x patch sequence.
+
+Numbered `v0.6.5` (patch over v0.6.4) — same Telegram-bridge
+subsystem, cadence consistent with v0.6.1 / v0.6.2 / v0.6.3 /
+v0.6.4.
+
+### Why this release
+
+Inline keyboard for binary DECISIONS needs a "what's binary?"
+heuristic — defer until 10+ real examples accumulate.
+`/yes <id>` and `/no <id>` skip the heuristic: operator opts in
+explicitly per decision, types two keystrokes on phone instead of
+"yes" or "no" as free-text. Same API payload, shorter input. Once
+inline keyboard ships in v0.7+, `/yes`/`/no` stays as the typed
+fallback.
+
+### What's planned
+
+- **`/yes <id>` and `/no <id>` slash commands.** Extend
+  `_CMD_WITH_ID_RE` from `(answer|reply|approve|cancel|snooze)` to
+  add `yes|no` verbs (body optional — these take no body). Two
+  verb arms in `_handle_message`'s with-ID branch.
+- **`_handle_yes_no(chat_id, decision_id, answer)`** — thin POST
+  wrapper around the existing `/api/decisions/{id}/answer`
+  endpoint. Returns `✅ decision #{id} answered: {yes|no}` on
+  success, surfaces API 400/404 errors verbatim on failure.
+- **Reply-to-decision shortcut.** Reply to a `❓ DECISION`
+  notification with bare `/yes` / `/no` / `yes` / `no` (case-
+  insensitive, strict whole-message) → resolves decision_id via
+  `_lookup_by_tg_message` → answers `yes` or `no`. Longer replies
+  like `Yes, do it` fall through to existing verbatim routing
+  unchanged.
+- **No audit-log row.** Matches the existing `/answer` slash
+  pattern from v0.3.0; the decisions answer endpoint is the
+  audit source. Departs from mvp2's audit-everything pattern on
+  purpose — `/answer` already doesn't audit; `/yes`/`/no` are
+  shortcuts to the same code path.
+- **`/help`** extended with the new pattern.
+
+### Schema delta
+
+None. Read-only data flow via existing endpoints.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: ~45-60 min. Smallest in the arc — no schema, no new
+endpoints, no UI surface, no operator config. Just regex + handler
++ reply-shortcut recognition.
+
+---
+
 ## v0.6.4 — Telegram reply-to-task-complete → follow-up `/run`
 
 Built against the amendment in
