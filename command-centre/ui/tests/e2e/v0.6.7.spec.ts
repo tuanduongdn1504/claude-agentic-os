@@ -197,10 +197,12 @@ test.describe('v0.6.7 — AttentionBar amber rendering for skill_budget_capped',
     await page.goto('/');
 
     // Both rows render; cost_capped (error) is ranked above skill_budget_capped
-    // (warning) so the order matches the spec.
+    // (warning) so the order matches the spec. describe() prefers it.message,
+    // matching the cost_capped convention — that's what the operator sees.
     const items = page.locator('[data-issue-kind]');
     await expect(items.nth(0)).toHaveAttribute('data-issue-kind', 'cost_capped');
     await expect(items.nth(1)).toHaveAttribute('data-issue-kind', 'skill_budget_capped');
-    await expect(items.nth(1)).toContainText('2 skills at daily budget');
+    await expect(items.nth(1)).toContainText('skill-red blocked at $1.50 / $1.00');
+    await expect(items.nth(1)).toContainText('+1 more');
   });
 });
