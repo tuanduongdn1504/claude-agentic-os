@@ -59,6 +59,74 @@ pre-gating · review lineage rows. See the amendment's "Not in this release".
 
 ---
 
+## v0.6.8 — DRAFT spec: expose historical ranges
+
+Spec only — not yet built. Full build directive in
+`observability/(C) build-your-own-dashboard-prompt-v0.6.8-amendment.md`,
+applied on top of current `main` HEAD (post v0.6.7).
+
+Surfaces data that is **already in the database** but currently
+unreachable from the UI. The dashboard's range toggle caps at 30
+days — but nothing prunes old data (no retention job, prune, purge,
+or vacuum exists anywhere), so every session / token / outcome row
+ever ingested is still there. This release adds `90d` / `1y` / `all`
+to the range selector so operators can see their full history.
+
+Numbered `v0.6.8` (patch over v0.6.7). No schema change, no new
+endpoint, no operator config. The backend already supports an `all`
+range (`helpers/timerange.py` maps it to `1=1`); this adds the `90d`
++ `1y` predicates and exposes the wider windows in the UI's single
+shared `RangePicker`.
+
+### Why this release
+
+The operator's own usage history is in the DB but the dashboard can't
+show more than 30 days of it — a one-character product gap. The
+backend already computes every window; the UI just never offered the
+wider ones. Read-only exposure of existing data; explicitly NOT a
+retention or cleanup feature.
+
+### What's planned
+
+- **`helpers/timerange.py`** — add `90d` (`-90 days`) + `1y`
+  (`-1 year`) predicates to `ALLOWED` + `sql_predicate`; `all`
+  (`1=1`) already exists. Extend the dead-but-latent `days_in_range`
+  dict with `90d` / `1y` keys so it can't `KeyError` once those
+  ranges are valid.
+- **`ui/src/lib/api.ts`** — widen
+  `Range = 'today' | '7d' | '30d' | '90d' | '1y' | 'all'`.
+- **`ui/src/components/panels/TokenUsageCard.tsx`** — extend the
+  shared `RANGES` array. ~14 panels + SessionsTable + SessionsPage
+  inherit the new options via the one shared `RangePicker`; no
+  per-panel change.
+- Defaults unchanged (`7d` / `30d`) — wider windows are opt-in via
+  the toggle, so initial load doesn't widen to `all`.
+
+### API delta
+
+None. Every range-aware endpoint already routes `?range=` through
+`sql_predicate` / `normalize`; the new values become valid the moment
+`ALLOWED` grows.
+
+### Schema delta
+
+None. Read-only over existing rows.
+
+### Status
+
+- [x] Spec drafted
+- [ ] Reviewed
+- [ ] Built
+- [ ] Smoke-tested
+
+Estimate: ~1–1.5h. The effort is in the multi-month seeded-fixture
+test (proving the wider windows return older rows), not the change
+itself. Retention / vacuum knob, custom date-range picker, weekly
+downsampling, and CSV export are explicitly deferred — see the
+amendment's "Not in this release."
+
+---
+
 ## v0.6.7 — per-skill daily cost budgets
 
 Built against the amendment in
