@@ -212,7 +212,12 @@ column.
 - **Per-account-per-skill budgets.** v0.6.3 added the `account_id`
   axis; combining "skill X has $5/day for account_a but $20/day
   for account_b" is a v0.7+ matrix concept. v0.6.7 sums across
-  all accounts for the skill.
+  all accounts for the skill. The per-skill cost predicates in
+  `dispatcher._skill_budget_state` and `routers/skills._today_cost_usd`
+  deliberately omit `account_id` filtering — a v0.7+ matrix must add
+  account scoping behind explicit config, not by filtering these
+  queries (which would change budget semantics for single-account
+  operators).
 - **Soft-warning + hard-cap pair** (two budgets per skill). v0.6.7
   uses a single hard cap + 80% amber threshold. Two-tier policies
   add config surface; defer until usage demands.

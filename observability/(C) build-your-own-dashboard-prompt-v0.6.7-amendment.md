@@ -364,6 +364,15 @@ Markdown V1 (matches mvp1/v0.6.2 style). `_md_safe` for skill name
   the `account_id` axis. Combining "skill X has $5/day for account_a
   but $20/day for account_b" is a v0.7+ matrix concept. MVP: skill-
   level only, summing across all accounts.
+  **Implementation invariant (do not "fix"):** both per-skill cost
+  predicates — `_skill_budget_state` in `dispatcher.py` and
+  `_today_cost_usd` in `routers/skills.py` — deliberately OMIT any
+  `account_id` filter. The budget is a per-skill global that sums
+  api_pool spend across all accounts. A future v0.7+ build agent
+  adding the matrix must introduce account scoping behind an explicit
+  per-account-budget config; it must NOT silently add `account_id`
+  filtering to these existing queries, which would change MVP budget
+  semantics for single-account operators.
 - **Soft warning + hard cap pair** (two budgets per skill) — MVP
   uses single hard cap + 80% amber threshold. Two-tier policies
   add config surface; defer until usage demands.
