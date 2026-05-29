@@ -1,5 +1,64 @@
 # Changelog
 
+## v0.7.0 — adversarial review gate  ·  **STATUS: DRAFT (not yet built)**
+
+> Spec: `observability/(C) build-your-own-dashboard-prompt-v0.7.0-amendment.md`.
+> Apply on top of `main` HEAD post v0.6.7 (`026f6bf`). This entry is a DRAFT —
+> flip to shipped once built + smoke-tested.
+
+The first MINOR bump since the project went patch-only at v0.2.0. Earns it:
+unlike v0.6.7 (a mechanical extension of the v0.2.0 cap shape — explicitly
+kept as a patch for that reason), v0.7.0 adds a **new execution path** (a
+second `claude -p` reviewer child per reviewed task) and **new task-lifecycle
+semantics** (a verdict gate between "ran ok" and "done"). It is the milestone
+the v0.6.x arc kept deferring to "v0.7+".
+
+Distilled from the Storm Bear wiki — Pattern #76 Adversarial Subagent Review
+Architecture (`gotalab/cc-sdd` v61) + Pattern #74 EARS-Format Requirements +
+Pattern #21 SDD Methodology. (Reciprocal to the 2026-05-29 wiki contribution
+that registered Command Center's cost-discipline architecture as an
+Observation-Track — wiki→product this time.)
+
+### Why this release
+
+A task is marked `done` today purely on its own `output_summary` (the agent
+grades its own homework). v0.7.0 adds an **independent reviewer**: for skills
+opted into `review_mode`, after the implementer exits ok the dispatcher spawns
+a reviewer `claude -p` child in the same workspace (so it re-reads the actual
+files — fresh evidence, not self-report) that returns `VERIFIED` /
+`NOT_VERIFIED` / `MANUAL_VERIFY_REQUIRED`. `VERIFIED` completes as today;
+anything else routes to the existing `awaiting_approval` state with the
+reviewer's reason attached. Opt-in per skill, **off by default**, because it
+~doubles the per-task API cost.
+
+### Surfaces (planned)
+
+- **Schema:** `skills.review_mode` + `ops_tasks.{success_criteria,
+  review_verdict, review_count, review_feedback}` via `_migrate_add_column`.
+- **Dispatcher:** `_skill_review_mode` + `_run_review` (verdict-marker scan,
+  fail-safe to `MANUAL_VERIFY_REQUIRED` on no-verdict/crash/timeout) + a gate
+  in the `run_once` completion block; one automatic retry (feedback prepended)
+  then escalation to `awaiting_approval`.
+- **Reuse, not rebuild:** escalations land in `awaiting_approval` — resolved
+  by the existing dashboard approve/reject + Telegram `/approve` `/cancel`
+  (v0.5.0-mvp2). No new decision wiring, near-zero Telegram work.
+- **API:** `PATCH /api/skills/{name}/review` + `review_mode` / `success_criteria`
+  / verdict fields on skill + task shapes + dispatcher rollup + `/api/attention`
+  `review_escalated` warning.
+- **UI:** SkillLauncher editor toggle, TaskBoard verdict badge, optional
+  `success_criteria` field, AttentionBar fold-in.
+- **Cost-honest:** reviewer spend is `api_pool`, counts toward the global cap
+  (v0.2.0) + per-skill budget (v0.6.7) post-hoc; `CC_REVIEW_MODEL` allows a
+  cheaper review tier.
+
+### Deferred
+
+"Accept output as-is" action · per-task review override · multi-reviewer
+N-vote panel · per-skill review-model routing · EARS parser · reviewer cost
+pre-gating · review lineage rows. See the amendment's "Not in this release".
+
+---
+
 ## v0.6.7 — per-skill daily cost budgets
 
 Built against the amendment in
