@@ -12,7 +12,11 @@ import type {
   UsageCache, UsageTokens,
 } from './types';
 
-export type Range = 'today' | '7d' | '30d';
+// v0.6.8 — `90d` / `1y` / `all` widen the window past 30 days. Adding union
+// members is backward-compatible: every `(range: Range = '7d')` signature and
+// the `qs()` URL builder pass the string straight through to the backend,
+// which already routes any value via `sql_predicate` / `normalize`.
+export type Range = 'today' | '7d' | '30d' | '90d' | '1y' | 'all';
 
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {

@@ -59,18 +59,22 @@ pre-gating · review lineage rows. See the amendment's "Not in this release".
 
 ---
 
-## v0.6.8 — DRAFT spec: expose historical ranges
+## v0.6.8 — expose historical ranges
 
-Spec only — not yet built. Full build directive in
+Built against the amendment in
 `observability/(C) build-your-own-dashboard-prompt-v0.6.8-amendment.md`,
-applied on top of current `main` HEAD (post v0.6.7).
+applied on top of current `main` HEAD (post v0.6.7). Smallest release of
+the v0.6.x arc — one backend helper, the `Range` type, and the one
+shared `RANGES` array.
 
 Surfaces data that is **already in the database** but currently
 unreachable from the UI. The dashboard's range toggle caps at 30
 days — but nothing prunes old data (no retention job, prune, purge,
 or vacuum exists anywhere), so every session / token / outcome row
 ever ingested is still there. This release adds `90d` / `1y` / `all`
-to the range selector so operators can see their full history.
+to the range selector so operators can see their full history. The
+operator-facing headline: **your data was never deleted — you just
+couldn't see past 30 days.**
 
 Numbered `v0.6.8` (patch over v0.6.7). No schema change, no new
 endpoint, no operator config. The backend already supports an `all`
@@ -86,44 +90,129 @@ backend already computes every window; the UI just never offered the
 wider ones. Read-only exposure of existing data; explicitly NOT a
 retention or cleanup feature.
 
-### What's planned
+### What ships
 
-- **`helpers/timerange.py`** — add `90d` (`-90 days`) + `1y`
-  (`-1 year`) predicates to `ALLOWED` + `sql_predicate`; `all`
-  (`1=1`) already exists. Extend the dead-but-latent `days_in_range`
-  dict with `90d` / `1y` keys so it can't `KeyError` once those
-  ranges are valid.
-- **`ui/src/lib/api.ts`** — widen
-  `Range = 'today' | '7d' | '30d' | '90d' | '1y' | 'all'`.
-- **`ui/src/components/panels/TokenUsageCard.tsx`** — extend the
-  shared `RANGES` array. ~14 panels + SessionsTable + SessionsPage
-  inherit the new options via the one shared `RangePicker`; no
-  per-panel change.
-- Defaults unchanged (`7d` / `30d`) — wider windows are opt-in via
-  the toggle, so initial load doesn't widen to `all`.
+- **`helpers/timerange.py`** — `90d` (`-90 days`) + `1y` (`-1 year`,
+  SQLite-native + leap-safe) predicates added to `ALLOWED` +
+  `sql_predicate`; `all` (`1=1`) was already there. The dead-but-latent
+  `days_in_range` dict gains `90d` / `1y` keys (90 / 365) so it can't
+  `KeyError` once those ranges are valid — defensive, nothing calls it
+  yet.
+- **`ui/src/lib/api.ts`** — `Range` widened to
+  `'today' | '7d' | '30d' | '90d' | '1y' | 'all'`. Additive union
+  member; every `(range: Range = '7d')` signature and the `qs()` URL
+  builder pass the string straight through.
+- **`ui/src/components/panels/TokenUsageCard.tsx`** — the shared
+  `RANGES` array extended to the six values, and each picker button now
+  carries a `data-range` attribute (additive, for deterministic test
+  selection — matches the existing `data-*` idiom). ~14 panels +
+  SessionsTable + SessionsPage inherit the new options via the one
+  shared `RangePicker`; no per-panel change.
+- Defaults unchanged (`7d` / `30d`) — wider windows are opt-in via the
+  toggle, so initial load doesn't widen to `all`.
+- **README** — one line under the dashboard section: the toggle now
+  offers `90d` / `1y` / `all`, and nothing prunes old data so `all` is
+  the operator's full history.
 
 ### API delta
 
 None. Every range-aware endpoint already routes `?range=` through
-`sql_predicate` / `normalize`; the new values become valid the moment
-`ALLOWED` grows.
+`sql_predicate` / `normalize`; the new values became valid the moment
+`ALLOWED` grew. The full set that immediately gained `90d` / `1y`:
+`usage/tokens`, `usage/cache`, `sessions/outcomes`, `tools/latency`,
+`hooks/activity`, `sessions/by-project`, `tools/agent-fanout`,
+`tools/edit-decisions`, `activity/productivity`, `activity/heatmap`,
+`sessions` (+ `sessions/failures`), `skills/economics`, `mcp`.
 
 ### Schema delta
 
 None. Read-only over existing rows.
 
-### Status
+### Verified
 
-- [x] Spec drafted
-- [ ] Reviewed
-- [ ] Built
-- [ ] Smoke-tested
+Backend + endpoints: `command-centre/scripts/dev/smoke_v0_6_8.py` boots
+a real server over a temp SQLite DB seeded with multi-month fixtures (10
+distinct days spanning the 30d / 90d / 1y windows + one >1-year-old
+row), startup sync neutralised (`CC_CLAUDE_PROJECTS_DIR` /
+`CC_COWORK_DIR` → missing dirs) so the DB holds only seeded rows.
+**26 / 26 checks** — amendment stop conditions 1–6 + 9.
 
-Estimate: ~1–1.5h. The effort is in the multi-month seeded-fixture
-test (proving the wider windows return older rows), not the change
-itself. Retention / vacuum knob, custom date-range picker, weekly
-downsampling, and CSV export are explicitly deferred — see the
-amendment's "Not in this release."
+- **Stop 1 — predicates.** `sql_predicate('90d')` → `… >=
+  datetime('now','-90 days')`; `'1y'` → the `-1 year` fragment; `'all'`
+  → `1=1` (unchanged). `normalize` passes `90d` / `1y` / `all` through,
+  coerces `bogus` → `7d`.
+- **Stop 2 — `days_in_range`.** No `KeyError` on any `ALLOWED` value;
+  `90d`→90, `1y`→365, `all`→365.
+- **Stop 5 — empty DB.** `?range=all` on a fresh DB returns
+  `daily: []` + all-zero totals (not null) on `usage/tokens`,
+  `sessions/outcomes`, and `sessions` — no crash.
+- **Stop 3 — wider windows ⊇ narrower.** Seeded date-sets chain
+  `30d ⊆ 90d ⊆ 1y ⊆ all`, counts 3 / 6 / 9 / 10 on both `usage/tokens`
+  and `sessions/outcomes`; `90d` surfaces days `30d` omits.
+- **Stop 4 — full history.** The >1-year-old row appears under `all`
+  and is absent from `1y` and `30d` (both endpoints).
+- **Stop 6 — pagination.** `GET /api/sessions?range=all&limit=10`
+  returns 10 rows (not the whole table), `total` = 310, `offset=10`
+  walks to a disjoint older page, ordered `started_at DESC`.
+- **Stop 9 — performance.** `?range=all` on `usage/tokens`,
+  `sessions/outcomes`, and `sessions` each complete in single-digit ms
+  with a few hundred seeded rows (index-backed).
+
+UI: `command-centre/ui/tests/e2e/v0.6.8.spec.ts` — **3 / 3 specs**
+against `page.route` fixtures (stops 7 + 8 on TokenUsageCard,
+SessionsPage, and the SkillCost panel).
+
+- **Stop 7 — picker + widening.** The shared `RangePicker` renders six
+  options; clicking `1Y` / `ALL` fires the widened request (`?range=1y`,
+  `?range=all`) and re-renders with no console error.
+- **Stop 8 — defaults unchanged.** First load still requests each
+  panel's prior default — TokenUsageCard `7d`, SessionsPage list `30d`,
+  SkillCost economics `30d` — never `all`, verified via the initial
+  request's `range` param.
+- **Stop 10 — backward compat.** `tsc --noEmit` clean with the widened
+  `Range` union; the v0.6.6 / v0.6.7 specs pass unchanged. (Two
+  unrelated v0.6.0 interaction specs — preset-reload round-trip and the
+  cost-source filter — are flaky in the local preview harness; verified
+  they fail identically on the pre-v0.6.8 build, so they're
+  environmental, not a regression from this change.)
+
+### Operator flow
+
+```bash
+cc restart                       # no migration; UI ships in ui/dist
+open http://127.0.0.1:8765/      # range toggle now: TODAY 7D 30D 90D 1Y ALL
+# Pick 1Y or ALL on any panel to see older history. Defaults are
+# unchanged, so a fresh load looks exactly like v0.6.7.
+```
+
+Nothing prunes old data, so `ALL` is your complete ingested history. If
+the DB ever grows uncomfortably, `cc doctor` reports `db_size_bytes`; an
+actual retention/vacuum knob is a v0.7+ feature (see below).
+
+### Tunables
+
+None this release. The new ranges are fixed preset buckets on the
+existing toggle — no env var, no config.
+
+### Not in this release (deferred)
+
+- **Retention / vacuum knob.** The *opposite* feature — actually
+  deleting old rows + reclaiming SQLite space on a schedule or by an
+  operator-set age (`MISSION_CONTROL_RETENTION_DAYS` + nightly prune +
+  `VACUUM`). v0.6.8 only *exposes* old data; deletion carries its own
+  irreversibility risks and is a separate v0.7+ concern.
+- **Custom date-range picker** (arbitrary from/to). MVP is the fixed
+  bucket toggle; a calendar range is a bigger UI surface.
+- **Weekly / monthly downsampling for long ranges.** `1y` / `all`
+  render up to ~365 daily bars — dense but functional. Bucketing to
+  weekly points is a charting concern.
+- **Uniform gap-filled date axis.** Days with no activity are simply
+  absent (no zero-fill); over long sparse ranges the x-axis collapses
+  gaps. Gap-fill touches every daily-series builder.
+- **CSV / JSON export of a range.** A natural sibling ("give me all my
+  data as a file") but a distinct feature.
+- **Per-range default persistence.** Remembering the operator's last
+  picked range per panel (localStorage). Nice-to-have.
 
 ---
 

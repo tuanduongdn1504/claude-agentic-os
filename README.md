@@ -15,6 +15,9 @@ breakdown, cache hit rate, session outcomes, tool latency p50/p95, hook
 activity, project + agent fanout, edit-acceptance, productivity, system
 pressure, MCP server drill-down, skills registry with autonomy controls,
 context health, OTEL firehose with pause/resume, full sessions table.
+Every range toggle offers `today` / `7d` / `30d` / `90d` / `1y` / `all`
+(v0.6.8) — and since nothing prunes old data, `all` is your complete
+ingested history.
 
 **Mission Control** — atomic task claim (BEGIN IMMEDIATE), per-PID marker
 files, fence-aware `DECISION:` / `INBOX:` scanner with stdin-mailbox reply

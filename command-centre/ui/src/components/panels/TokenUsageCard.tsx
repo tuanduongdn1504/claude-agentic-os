@@ -5,7 +5,11 @@ import { useUsageTokens } from '@/hooks/useQueries';
 import type { Range } from '@/lib/api';
 import { fmtCount, fmtUsd } from '@/lib/format';
 
-const RANGES: Range[] = ['today', '7d', '30d'];
+// v0.6.8 — `90d` / `1y` / `all` exposed. The single shared RangePicker below
+// is consumed by ~14 panels + SessionsTable + SessionsPage, so widening this
+// one array propagates the new options everywhere. Per-panel defaults are
+// unchanged (each keeps its own useState<Range>('7d' | '30d')).
+const RANGES: Range[] = ['today', '7d', '30d', '90d', '1y', 'all'];
 
 // Stacked bars: input + output + cache_read + cache_create per day.
 export function TokenUsageCard() {
@@ -168,6 +172,7 @@ export function RangePicker({ value, onChange }: { value: Range; onChange: (r: R
       {RANGES.map(r => (
         <button
           key={r}
+          data-range={r}
           onClick={() => onChange(r)}
           className={`px-2.5 h-6 rounded-md transition-colors ${
             value === r ? 'bg-surface-3 text-text' : 'text-text-dim hover:text-text'
