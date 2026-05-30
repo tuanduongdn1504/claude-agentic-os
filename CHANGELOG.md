@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.7.1 — accept review output as-is  ·  **STATUS: DRAFT (not yet built)**
+
+> Spec: `observability/(C) build-your-own-dashboard-prompt-v0.7.1-amendment.md`.
+> Apply on top of `main` HEAD post v0.7.0 (`233acf8`). DRAFT — flip to shipped
+> once built + smoke-tested.
+
+A **patch** over v0.7.0 (no new architectural concept — extends the existing
+escalation resolution). v0.7.0 escalates a review-failed task to
+`awaiting_approval`, where `/approve` **re-runs** and `/cancel` **drops** — but
+there's no way to say *"the reviewer was wrong, the output is fine, just mark
+it done."* The first reviewer false-negative forces a wasted re-run or lost
+work. v0.7.1 adds **accept**: complete the task with the output the
+implementer already produced, no re-run.
+
+### The dependency it fixes
+
+v0.7.0's escalation branch **discards the implementer's `output_summary`**
+(only the VERIFIED arm calls `complete_task`). So accept would have nothing to
+accept. v0.7.1 first preserves `output_summary` / `session_id` / `duration_ms`
+at escalation — which also lets the escalated TaskBoard card finally show the
+output the operator is judging.
+
+### Surfaces (planned)
+
+- **Schema:** `ops_tasks.review_overridden` (0/1) — marks a task completed by
+  accepting it despite a non-VERIFIED verdict; `review_verdict` is preserved
+  for audit.
+- **Dispatcher:** preserve output at escalation (the dependency above).
+- **API:** `POST /api/tasks/{id}/accept` — guarded to **review escalations
+  only** (`awaiting_approval` AND `review_verdict IS NOT NULL`); risk/autonomy
+  gated tasks that never ran are refused ("use /approve"). Marks done with the
+  preserved output, `review_overridden=1`, audits `task_review_overridden`.
+  No dispatch, no agent spawn — **zero cost**.
+- **Telegram:** `/accept <id>` (+ reply-to-notification shortcut); the
+  escalation ping now offers accept / approve / cancel.
+- **UI:** TaskBoard "Accept output" button + preserved-output render +
+  distinct "done · accepted over review" badge.
+
+### Deferred
+
+Bulk accept · auto-accept policy (the `task_review_overridden` audit rows are
+its future data source) · overridden-today rollup · re-review on accept.
+
+---
+
 ## v0.7.0 — adversarial review gate
 
 > Spec: `observability/(C) build-your-own-dashboard-prompt-v0.7.0-amendment.md`.
