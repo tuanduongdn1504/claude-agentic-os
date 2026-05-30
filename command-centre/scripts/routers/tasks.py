@@ -53,7 +53,8 @@ async def list_tasks(status: Optional[str] = None, quadrant: Optional[str] = Non
                    consecutive_failures, created_at,
                    COALESCE(cost_source, 'unknown') AS cost_source,
                    success_criteria, review_verdict,
-                   COALESCE(review_count, 0) AS review_count, review_feedback
+                   COALESCE(review_count, 0) AS review_count, review_feedback,
+                   COALESCE(review_overridden, 0) AS review_overridden
             FROM ops_tasks
             WHERE {' AND '.join(clauses)}
             ORDER BY
@@ -231,6 +232,78 @@ async def cancel_task(
             (json.dumps({"task_id": task_id, "prior_status": prior_status, "source": src}),),
         )
     return {"cancelled": True, "task_id": task_id, "prior_status": prior_status, "source": src}
+
+
+@router.post("/api/tasks/{task_id}/accept")
+async def accept_task(
+    task_id: int,
+    source: str = Query(_DEFAULT_AUDIT_SOURCE, max_length=64),
+) -> dict[str, Any]:
+    """Accept a review escalation as-is — complete it with the output the
+    implementer already produced, WITHOUT re-running.
+
+    v0.7.1 — the THIRD resolution for an `awaiting_approval` review escalation,
+    beside /approve (re-run with feedback) and /cancel (drop). Use when the
+    reviewer false-negatived: the work is fine, just mark it done.
+
+    Guard — review escalations ONLY. An `awaiting_approval` task can also come
+    from the risk gate (run_once ~600) or autonomy gate (~650); those NEVER RAN
+    so there is no output to accept. `review_verdict IS NOT NULL` is the
+    discriminator — refuse anything else (use /approve to run it). This is the
+    key correctness boundary: accept marks a task done with EXISTING output.
+
+    Pure state transition: NO dispatcher trigger, NO agent spawn — unlike
+    /approve it does not re-dispatch and unlike the v0.7.0 reviewer it spawns no
+    `claude -p`. Zero added cost. Sets `status='done'`, `review_overridden=1`,
+    `completed_at=now`; KEEPS the preserved `output_summary` / `session_id` /
+    `duration_ms` and the `review_verdict` / `review_feedback` (the audit trail
+    of WHY it escalated). Writes an `activities` row `task_review_overridden`
+    (load-bearing — an operator overriding an independent reviewer must be
+    traceable). A clean VERIFIED completion never touches this path.
+    """
+    src = (source or _DEFAULT_AUDIT_SOURCE).strip() or _DEFAULT_AUDIT_SOURCE
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT status, review_verdict, review_feedback "
+            "FROM ops_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, "task not found")
+        prior_status = row["status"]
+        prior_verdict = row["review_verdict"]
+        if prior_status != "awaiting_approval":
+            raise HTTPException(
+                400, f"task #{task_id} is {prior_status}, not awaiting approval")
+        if prior_verdict is None:
+            raise HTTPException(
+                400,
+                f"task #{task_id} is not a review escalation — there is no "
+                f"output to accept; use /approve to run it")
+        # Pure state transition. output_summary / session_id / duration_ms were
+        # preserved at escalation (dispatcher v0.7.1); review_verdict /
+        # review_feedback stay for the audit trail. Only flip status + mark the
+        # override + stamp completion.
+        conn.execute(
+            "UPDATE ops_tasks SET status='done', review_overridden=1, "
+            "completed_at=datetime('now') WHERE id = ?",
+            (task_id,),
+        )
+        fb = row["review_feedback"]
+        conn.execute(
+            "INSERT INTO activities(event_type, detail) "
+            "VALUES ('task_review_overridden', ?)",
+            (json.dumps({
+                "task_id": task_id,
+                "prior_verdict": prior_verdict,
+                "review_feedback_first_120": (fb[:120] if fb else None),
+                "source": src,
+            }),),
+        )
+        updated = conn.execute(
+            "SELECT * FROM ops_tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    return dict(updated) if updated else {"accepted": True, "task_id": task_id}
 
 
 @router.post("/api/tasks/{task_id}/rerun")

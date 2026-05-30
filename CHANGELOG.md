@@ -1,10 +1,10 @@
 # Changelog
 
-## v0.7.1 — accept review output as-is  ·  **STATUS: DRAFT (not yet built)**
+## v0.7.1 — accept review output as-is
 
 > Spec: `observability/(C) build-your-own-dashboard-prompt-v0.7.1-amendment.md`.
-> Apply on top of `main` HEAD post v0.7.0 (`233acf8`). DRAFT — flip to shipped
-> once built + smoke-tested.
+> Shipped on branch `claude/v0.7.1`. Built on `main` HEAD `191cb78` (v0.7.0
+> `233acf8` + the v0.7.1 DRAFT spec).
 
 A **patch** over v0.7.0 (no new architectural concept — extends the existing
 escalation resolution). v0.7.0 escalates a review-failed task to
@@ -14,34 +14,92 @@ it done."* The first reviewer false-negative forces a wasted re-run or lost
 work. v0.7.1 adds **accept**: complete the task with the output the
 implementer already produced, no re-run.
 
-### The dependency it fixes
+### The dependency it fixes (the load-bearing part)
 
-v0.7.0's escalation branch **discards the implementer's `output_summary`**
-(only the VERIFIED arm calls `complete_task`). So accept would have nothing to
-accept. v0.7.1 first preserves `output_summary` / `session_id` / `duration_ms`
-at escalation — which also lets the escalated TaskBoard card finally show the
-output the operator is judging.
+v0.7.0's escalation branch **discarded the implementer's `output_summary`**
+(only the VERIFIED arm called `complete_task`), so an escalated task had
+`output_summary = NULL` and accept would have had nothing to accept. v0.7.1
+first preserves `output_summary` / `session_id` / `duration_ms` at escalation
+(`dispatcher.run_once`, the NOT_VERIFIED-after-retry / MANUAL_VERIFY_REQUIRED
+`else:` branch) — which also lets the escalated TaskBoard card finally show the
+output the operator is judging. Without this, accept is hollow.
 
-### Surfaces (planned)
+### Surfaces (built)
 
-- **Schema:** `ops_tasks.review_overridden` (0/1) — marks a task completed by
-  accepting it despite a non-VERIFIED verdict; `review_verdict` is preserved
-  for audit.
-- **Dispatcher:** preserve output at escalation (the dependency above).
-- **API:** `POST /api/tasks/{id}/accept` — guarded to **review escalations
-  only** (`awaiting_approval` AND `review_verdict IS NOT NULL`); risk/autonomy
-  gated tasks that never ran are refused ("use /approve"). Marks done with the
-  preserved output, `review_overridden=1`, audits `task_review_overridden`.
-  No dispatch, no agent spawn — **zero cost**.
-- **Telegram:** `/accept <id>` (+ reply-to-notification shortcut); the
-  escalation ping now offers accept / approve / cancel.
-- **UI:** TaskBoard "Accept output" button + preserved-output render +
-  distinct "done · accepted over review" badge.
+- **Schema:** `ops_tasks.review_overridden INTEGER NOT NULL DEFAULT 0` via
+  `_migrate_add_column` (mirrors the v0.7.0 block; idempotent, existing rows
+  read 0). `1` = completed by accepting over a non-VERIFIED verdict; the
+  `review_verdict` is **kept** so the audit trail shows WHY it escalated.
+- **Dispatcher:** the escalation `update_task` now also stores
+  `output_summary=summary_head`, `session_id`, `duration_ms` (the gotcha fix).
+  The VERIFIED / NOT_VERIFIED-retry / verdict logic is otherwise untouched.
+- **API:** `POST /api/tasks/{id}/accept` (mirrors `/approve` + `/cancel`) —
+  guarded to **review escalations only** (`status='awaiting_approval'` AND
+  `review_verdict IS NOT NULL`). A risk/autonomy-gated task (verdict NULL,
+  never ran) is refused `400 … not a review escalation … use /approve`; wrong
+  states `400`. On accept: `status='done'`, `review_overridden=1`,
+  `completed_at=now`, keeping the preserved output + verdict + feedback. Writes
+  an `activities` `task_review_overridden` row (`prior_verdict`,
+  `review_feedback_first_120`, `source`). **No dispatch, no `claude -p` spawn —
+  zero added cost.** (`GET /api/tasks` now also returns `review_overridden`.)
+- **Telegram:** `/accept <id>` (verb added to `_CMD_WITH_ID_RE`; `_handle_accept`
+  mirrors `_handle_approve` → `POST .../accept?source=telegram`). The
+  review-escalation reply router gains a strict-match `/accept` / bare `accept`
+  shortcut (v0.6.5 `/yes` `/no` shape); any longer reply still falls through to
+  `/approve` (re-run). The escalation ping now offers accept / approve / cancel;
+  `/help` gains a line.
+- **UI (TaskBoard):** the review-escalated card now renders the preserved
+  `output_summary` and offers **Accept output / approve / cancel**; after
+  accept a distinct **amber "✓ done · accepted over review"** badge renders
+  (`status='done' && review_overridden=1`), visually separate from a clean
+  green ✓ VERIFIED so the override is never invisible.
+
+### Verified
+
+- `command-centre/scripts/dev/smoke_v0_7_1.py` — **43 / 43**, all 12 stop
+  conditions: output preserved at escalation (NOT_VERIFIED + MANUAL_VERIFY);
+  accept happy path (done · `review_overridden=1` · output + verdict kept · no
+  re-run — session_id/cost unchanged, `today_cost_usd` stays $0); accept
+  refuses non-review awaiting_approval (verdict NULL → "use /approve"); accept
+  refuses pending/running/done (400) + missing (404); the audit row; approve
+  still re-dispatches (`review_overridden` stays 0); cancel still drops;
+  VERIFIED keeps `review_overridden=0` + risk `/approve` untouched;
+  `GET /api/tasks` exposes `review_overridden`; Telegram `/accept <id>` slash +
+  reply-`/accept` + bare `accept` (strict) + the longer-reply fall-through to
+  approve.
+- `command-centre/ui/tests/e2e/v0.7.1.spec.ts` — **2 / 2** (escalated card
+  Accept-output button → `POST /accept` → preserved output + "done · accepted
+  over review" badge; badge distinct from a clean ✓ VERIFIED). `tsc --noEmit`
+  clean; `vite build` clean.
+- Backward compat (stop 11): smoke v0.7.0 **69/69** · v0.6.1 **20/20** ·
+  v0.6.2 **39/39** · v0.6.4 **45/45** · v0.6.5 **43/43** · v0.6.7 **35/35** ·
+  v0.6.8 **26/26** — all unchanged. e2e: v0.7.0 TaskBoard verdict-badge +
+  v0.6.6/v0.6.7/v0.6.8 green. (One pre-existing **environment-only** e2e
+  failure — v0.7.0's SkillLauncher `review_mode` toggle, a `check({force})` on
+  an `sr-only` checkbox — reproduces identically against the **unmodified main
+  dist**, so it is not a v0.7.1 regression; the unchanged SkillLauncher was not
+  touched.)
+
+### Implementation notes (deviations from the spec, flagged)
+
+1. **`POST /accept` returns the full updated task row**, not the small
+   `{accepted: true}` shape that `/approve` + `/cancel` return — following the
+   spec's explicit "API delta → step 5: *Return the updated task*" over the
+   mirror's return shape. The UI's `useAcceptTask` and the smoke both consume
+   the returned `review_overridden` directly.
+2. **A Cancel button was added to the escalated card** (with `cancelTask` /
+   `useCancelTask`). The spec's UI delta says "beside the existing Approve
+   (re-run) and **Cancel** (drop)" and stop condition 10 wants the escalated
+   card to show "Accept/Approve/Cancel" — but the v0.7.0 TaskBoard had no
+   Cancel button (only Approve/Rerun/Delete). Cancel is scoped to
+   review-escalated cards; risk/autonomy-gated `awaiting_approval` cards keep
+   the single Approve, exactly as in v0.7.0.
 
 ### Deferred
 
 Bulk accept · auto-accept policy (the `task_review_overridden` audit rows are
-its future data source) · overridden-today rollup · re-review on accept.
+its future data source) · overridden-today rollup + AttentionBar tile ·
+re-review on accept.
 
 ---
 

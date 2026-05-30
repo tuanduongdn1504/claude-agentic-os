@@ -1,15 +1,17 @@
-// 3-column task board: pending · running · done. Per-row approve/rerun/delete.
+// 3-column task board: pending · running · done. Per-row approve/rerun/delete;
+// review escalations (v0.7.1) also get accept-output / cancel.
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, Kicker } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { StatePill } from '@/components/ui/StatePill';
 import {
-  useApproveTask, useDeleteTask, useRerunTask, useTasks, useTriggerDispatcher,
+  useAcceptTask, useApproveTask, useCancelTask, useDeleteTask, useRerunTask,
+  useTasks, useTriggerDispatcher,
 } from '@/hooks/useQueries';
 import type { TaskQuadrant, TaskRow, TaskStatus } from '@/lib/types';
 import { fmtMs, fmtUsd } from '@/lib/format';
-import { CheckCircle2, Play, RotateCcw, Trash2, Zap } from 'lucide-react';
+import { Check, CheckCircle2, Play, RotateCcw, Trash2, X, Zap } from 'lucide-react';
 import { CostSourcePill } from './CostSourceUI';
 
 type Column = { key: 'queue' | 'running' | 'done'; label: string; statuses: TaskStatus[] };
@@ -115,9 +117,19 @@ export function TaskBoard() {
 
 function TaskCard({ task }: { task: TaskRow }) {
   const approve = useApproveTask();
+  const cancel = useCancelTask();
+  const accept = useAcceptTask();
   const rerun = useRerunTask();
   const del = useDeleteTask();
   const quadrant = task.quadrant ?? 'do';
+
+  // v0.7.1 — a review escalation (awaiting_approval with a non-NULL verdict)
+  // gets the three-way resolution: accept output / approve (re-run) / cancel.
+  // A risk- or autonomy-gated awaiting_approval task (verdict NULL) keeps the
+  // single approve button, exactly as before.
+  const isReviewEscalated = task.status === 'awaiting_approval' && !!task.review_verdict;
+  // Completed by accepting the output over a non-VERIFIED review.
+  const acceptedOverReview = task.status === 'done' && !!task.review_overridden;
 
   return (
     <div className="bg-surface-2/60 border border-border rounded-lg p-3 hover:border-border-glow transition-colors">
@@ -161,6 +173,15 @@ function TaskCard({ task }: { task: TaskRow }) {
             </span>
           );
         })()}
+        {/* v0.7.1 — operator accepted the output despite a non-VERIFIED review.
+            Distinct amber badge — the preserved verdict badge above still shows
+            the reviewer's ✗, so the override is never invisible (and it never
+            reads as a clean green ✓ VERIFIED). */}
+        {acceptedOverReview && (
+          <span data-accepted-over-review>
+            <Badge tone="amber">✓ done · accepted over review</Badge>
+          </span>
+        )}
       </div>
 
       {(task.duration_ms != null || task.cost_usd != null) && (
@@ -189,15 +210,58 @@ function TaskCard({ task }: { task: TaskRow }) {
         </div>
       )}
 
+      {/* v0.7.1 — preserved implementer output (kept at escalation by the
+          dispatcher), so the operator can read what they're about to accept,
+          or what they already accepted. */}
+      {task.output_summary && (isReviewEscalated || acceptedOverReview) && (
+        <div
+          className="text-[11px] text-text-dim font-mono bg-surface/60 border border-border rounded p-1.5 mb-2 max-h-28 overflow-y-auto whitespace-pre-wrap break-words"
+          data-output-summary
+        >
+          {task.output_summary}
+        </div>
+      )}
+
       <div className="flex items-center gap-1">
-        {task.status === 'awaiting_approval' && (
+        {/* v0.7.1 — accept the output as-is (no re-run). Review escalations only;
+            a risk/autonomy gate never ran, so there is no output to accept. */}
+        {isReviewEscalated && (
           <Button
             size="sm" variant="primary"
+            leftIcon={<Check size={12} />}
+            onClick={() => accept.mutate(task.id)}
+            disabled={accept.isPending}
+            data-action="accept-task"
+            title="Mark done with the current output — the reviewer flagged it but you've judged it fine."
+          >
+            accept output
+          </Button>
+        )}
+        {task.status === 'awaiting_approval' && (
+          <Button
+            size="sm" variant={isReviewEscalated ? 'secondary' : 'primary'}
             leftIcon={<CheckCircle2 size={12} />}
             onClick={() => approve.mutate(task.id)}
             disabled={approve.isPending}
+            title={isReviewEscalated
+              ? 'Re-run the task with the reviewer feedback prepended'
+              : undefined}
           >
             approve
+          </Button>
+        )}
+        {/* v0.7.1 — drop a review escalation. (Risk-gated cards keep their
+            v0.7.0 single-approve layout; cancel them from the existing flows.) */}
+        {isReviewEscalated && (
+          <Button
+            size="sm" variant="ghost"
+            leftIcon={<X size={12} />}
+            onClick={() => { if (confirm(`Cancel task "${task.title}"?`)) cancel.mutate(task.id); }}
+            disabled={cancel.isPending}
+            data-action="cancel-task"
+            title="Drop the task without completing it."
+          >
+            cancel
           </Button>
         )}
         {task.status === 'failed' && (

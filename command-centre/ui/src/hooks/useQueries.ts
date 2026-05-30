@@ -135,6 +135,15 @@ export function useApproveTask() {
   const qc = useQueryClient();
   return useMutation({ mutationFn: api.approveTask, onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }) });
 }
+export function useCancelTask() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: api.cancelTask, onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }) });
+}
+// v0.7.1 — accept a review escalation as-is (no re-run).
+export function useAcceptTask() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: api.acceptTask, onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }) });
+}
 export function useRerunTask() {
   const qc = useQueryClient();
   return useMutation({ mutationFn: api.rerunTask, onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }) });

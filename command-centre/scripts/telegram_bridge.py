@@ -316,8 +316,12 @@ def _format_review_gated(t: dict) -> str:
     )
     if reason:
         body += f"\n\n_reviewer:_ {reason}"
+    # v0.7.1 — a review escalation now has THREE resolutions. /accept keeps the
+    # implementer's output as-is (no re-run); /approve re-runs with the feedback
+    # prepended; /cancel drops it.
     body += (
-        f"\n\nReply `/approve {t['id']}` to re-run with this feedback, "
+        f"\n\nReply `/accept {t['id']}` to keep the output, "
+        f"`/approve {t['id']}` to re-run with this feedback, "
         f"or `/cancel {t['id']}` to drop."
     )
     return body
@@ -491,7 +495,7 @@ def _outbound_loop() -> None:
 # optional in _CMD_WITH_ID_RE so /approve and /cancel parse without one.
 # `/status` is a third sibling — strict whole-message match, no args.
 _CMD_WITH_ID_RE = re.compile(
-    r"^/(answer|reply|approve|cancel|snooze|yes|no)\s+(\d+)(?:\s+(.+))?$",
+    r"^/(answer|reply|approve|cancel|snooze|yes|no|accept)\s+(\d+)(?:\s+(.+))?$",
     re.IGNORECASE | re.DOTALL,
 )
 _CMD_RUN_RE = re.compile(r"^/run\s+(.+)$", re.IGNORECASE | re.DOTALL)
@@ -661,6 +665,36 @@ def _handle_cancel(chat_id: Any, message_id: Any, task_id: int) -> None:
                         f"⚠️ cancel failed · {code} · {safe_body}")
         else:
             _reply_text(chat_id, message_id, f"⚠️ cancel failed · {safe_body}")
+
+
+def _handle_accept(chat_id: Any, message_id: Any, task_id: int) -> None:
+    """`/accept <task_id>` — POST /api/tasks/{id}/accept?source=telegram.
+
+    v0.7.1 — keep a review-flagged task's output as-is (no re-run). Mirrors
+    _handle_approve; the API guard refuses anything that isn't a review
+    escalation (awaiting_approval + non-NULL review_verdict), so a 400 body is
+    surfaced verbatim (via `_md_safe`) to the operator."""
+    try:
+        _http_post_json(
+            f"{DASHBOARD_URL}/api/tasks/{task_id}/accept?source=telegram",
+            {},
+        )
+        _reply_text(chat_id, message_id,
+                    f"✅ task `#{task_id}` accepted as-is · output kept, "
+                    f"review overridden")
+    except Exception as exc:
+        code, body = _http_status_from_exc(exc)
+        safe_body = _md_safe(body) if body else ""
+        if code == 404:
+            _reply_text(chat_id, message_id, f"task `#{task_id}` not found")
+        elif code in (400, 409):
+            _reply_text(chat_id, message_id,
+                        f"task `#{task_id}` cannot be accepted · {safe_body}")
+        elif code is not None:
+            _reply_text(chat_id, message_id,
+                        f"⚠️ accept failed · {code} · {safe_body}")
+        else:
+            _reply_text(chat_id, message_id, f"⚠️ accept failed · {safe_body}")
 
 
 # ---------------------------------------------------------------------------
@@ -1316,9 +1350,12 @@ def _handle_status(chat_id: Any) -> None:
 def _handle_message(msg: dict) -> None:
     """Process a single Telegram message — reply-to or slash-command.
 
-    Routing order (v0.5.0-mvp2 + v0.6.1 + v0.6.2 + v0.6.4 + v0.6.5):
+    Routing order (v0.5.0-mvp2 + v0.6.1 + v0.6.2 + v0.6.4 + v0.6.5 + v0.7.1):
       1. reply-to-message → lookup notification_log
          - risk_gated → /approve <task_id>              (v0.5.0-mvp2, FR17)
+         - review_gated + body `/accept`|`accept` (strict whole-message)
+           → _handle_accept                             (v0.7.1)
+         - review_gated (any other reply) → /approve    (v0.7.0)
          - task_complete → _handle_task_followup        (v0.6.4)
          - decision + body `/yes`|`yes`|`/no`|`no` (strict whole-message)
            → _handle_yes_no                              (v0.6.5)
@@ -1331,6 +1368,7 @@ def _handle_message(msg: dict) -> None:
          - /run <prompt>            → _handle_run       (v0.5.0-mvp2, FR1-4)
          - /approve <id>            → _handle_approve   (v0.5.0-mvp2, FR16)
          - /cancel <id>             → _handle_cancel    (v0.5.0-mvp2, FR18)
+         - /accept <id>             → _handle_accept    (v0.7.1)
          - /snooze <id> [duration]  → _handle_snooze    (v0.6.2, Phase 2)
          - /yes <id> | /no <id>     → _handle_yes_no    (v0.6.5, Phase 2)
       3. /help | /start → usage text
@@ -1359,6 +1397,23 @@ def _handle_message(msg: dict) -> None:
                 # in the SAME awaiting_approval state and is resolved by the SAME
                 # /approve, so it routes here too. No new verb, no new parser.
                 if event_type in ("risk_gated", "review_gated"):
+                    # v0.7.1 — a review escalation can be resolved THREE ways. A
+                    # reply of exactly `/accept` or bare `accept` (case-
+                    # insensitive, strict whole-message — same shape as the
+                    # v0.6.5 /yes /no shortcut) keeps the implementer's output
+                    # as-is via /accept. Anything else (incl. a longer "accept
+                    # but note X") falls through to the v0.7.0 default:
+                    # reply-to-review = /approve (re-run). Scoped to review_gated
+                    # — a risk_gated task has review_verdict NULL, so /accept
+                    # would 400; its /approve path is untouched.
+                    if (event_type == "review_gated"
+                            and text.strip().lower() in ("/accept", "accept")):
+                        try:
+                            _handle_accept(chat, message_id, int(event_key))
+                        except (ValueError, TypeError):
+                            _reply_text(chat, message_id,
+                                        f"⚠️ bad task id in notification_log: {event_key!r}")
+                        return
                     try:
                         _handle_approve(chat, message_id, int(event_key))
                     except (ValueError, TypeError):
@@ -1497,6 +1552,10 @@ def _handle_message(msg: dict) -> None:
         elif verb == "cancel":
             _handle_cancel(chat, message_id, ref_id)
             return
+        elif verb == "accept":
+            # v0.7.1 — keep a review-flagged task's output as-is (no re-run).
+            _handle_accept(chat, message_id, ref_id)
+            return
         elif verb == "snooze":
             # `ref_id` is the decision_id; `body` is the optional duration
             # (the with-ID regex's group(3) is named `body` but its job for
@@ -1521,7 +1580,7 @@ def _handle_message(msg: dict) -> None:
         _reply_text(chat, message_id,
                     "usage: `/run <prompt>` — first 80 chars become the task title.")
         return
-    if bare in ("/approve", "/cancel"):
+    if bare in ("/approve", "/cancel", "/accept"):
         _reply_text(chat, message_id, f"usage: `{bare} <task_id>` — numeric id required.")
         return
     if bare == "/snooze":
@@ -1544,11 +1603,13 @@ def _handle_message(msg: dict) -> None:
                 "`/run <prompt>` — queue a new headless task\n"
                 "`/approve <task_id>` — override a risk-gated task\n"
                 "`/cancel <task_id>` — cancel a pending / risk-gated task\n"
+                "`/accept <task_id>` — keep a review-flagged task's output as-is (no re-run)\n"
                 "`/snooze <decision_id> [30m|2h|1d]` — suppress re-fire (default 30m, max 24h)\n"
                 "`/yes <decision_id>` · `/no <decision_id>` — shortcut to answer a binary decision\n\n"
                 "_Reply to a_ 🛑 _RISK-GATED notification with any text to approve._\n"
                 "_Tasks under adversarial review that fail verification land in approval —_ "
-                "`/approve <id>` _to re-run with the reviewer's feedback,_ `/cancel <id>` _to drop._\n"
+                "`/accept <id>` _to keep the output as-is,_ `/approve <id>` _to re-run with "
+                "the reviewer's feedback,_ `/cancel <id>` _to drop._\n"
                 "_Reply to a_ ❓ _DECISION notification with_ `/snooze [duration]` _to defer it,_\n"
                 "_or with just_ `/yes` _/_ `/no` _(or bare_ `yes` _/_ `no` _) to answer it._\n"
                 "_Reply to a_ ✅ _task-complete notification with a follow-up instruction "

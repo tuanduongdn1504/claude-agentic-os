@@ -903,8 +903,20 @@ def run_once(verbose: bool = False) -> dict[str, int]:
                     # human. Lands in awaiting_approval (exactly like the risk
                     # gate); resolved by the EXISTING approve/reject + Telegram
                     # /approve /cancel. No new decision wiring.
-                    task_tracker.update_task(task["id"], status="awaiting_approval",
-                                             started_at=None)
+                    #
+                    # v0.7.1 — PRESERVE the implementer's output at escalation.
+                    # Pre-v0.7.1 this branch discarded summary_head (only the
+                    # VERIFIED arm above calls complete_task), so an escalated
+                    # task had output_summary=NULL and the v0.7.1 /accept action
+                    # would have nothing to accept. Store the same tail +
+                    # session_id + duration the VERIFIED arm keeps, so the
+                    # operator can read it on the card and accept it as-is.
+                    task_tracker.update_task(
+                        task["id"], status="awaiting_approval", started_at=None,
+                        output_summary=summary_head,
+                        session_id=result.get("session_id"),
+                        duration_ms=elapsed_ms,
+                    )
                     stats["review_escalated"] += 1
                     task_tracker.log_activity(
                         "task_review_escalated",

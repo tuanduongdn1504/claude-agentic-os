@@ -8,7 +8,8 @@ import type {
   Productivity, SchedulesList, ScheduleRuns, SessionDetails, SessionFailure,
   SessionList, SessionOutcomes, SkillPreset, SkillRow, SkillsEconomics,
   SkillsList, Sparklines,
-  Summary, SystemHealth, SystemPressure, TasksList, TelegramStatus, ToolLatency,
+  Summary, SystemHealth, SystemPressure, TaskRow, TasksList, TelegramStatus,
+  ToolLatency,
   UsageCache, UsageTokens,
 } from './types';
 
@@ -187,6 +188,12 @@ export const deleteTask = (id: number) =>
   j<{ deleted: number }>(`/api/tasks/${id}`, { method: 'DELETE' });
 export const approveTask = (id: number) =>
   j<{ approved: boolean }>(`/api/tasks/${id}/approve`, { method: 'POST' });
+export const cancelTask = (id: number) =>
+  j<{ cancelled: boolean; task_id: number }>(`/api/tasks/${id}/cancel`, { method: 'POST' });
+// v0.7.1 — accept a review escalation as-is (no re-run). Returns the updated
+// task row; guarded server-side to awaiting_approval + non-NULL review_verdict.
+export const acceptTask = (id: number) =>
+  j<TaskRow>(`/api/tasks/${id}/accept`, { method: 'POST' });
 export const rerunTask = (id: number) =>
   j<{ rerun: boolean; task_id: number }>(`/api/tasks/${id}/rerun`, { method: 'POST' });
 export const patchTask = (id: number, patch: Partial<NewTask> & { status?: string }) =>

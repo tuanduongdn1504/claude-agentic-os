@@ -415,6 +415,12 @@ def apply_migrations() -> None:
         _migrate_add_column(conn, "ops_tasks", "review_verdict",   "TEXT")
         _migrate_add_column(conn, "ops_tasks", "review_count",     "INTEGER NOT NULL DEFAULT 0")
         _migrate_add_column(conn, "ops_tasks", "review_feedback",  "TEXT")
+        # v0.7.1 — accept-review-output-as-is. 0 = normal completion; 1 = the
+        # operator accepted the output despite a non-VERIFIED review (the
+        # review_verdict is preserved as-is for the audit trail). Additive +
+        # idempotent; every existing row reads 0 = behaves exactly as pre-v0.7.1
+        # (a clean VERIFIED completion also keeps review_overridden=0).
+        _migrate_add_column(conn, "ops_tasks", "review_overridden", "INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------------------

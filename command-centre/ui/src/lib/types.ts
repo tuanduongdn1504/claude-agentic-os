@@ -277,6 +277,9 @@ export interface TaskRow {
   review_verdict?: 'VERIFIED' | 'NOT_VERIFIED' | 'MANUAL_VERIFY_REQUIRED' | null;
   review_count?: number;
   review_feedback?: string | null;
+  // v0.7.1 — 1 when the operator accepted the output despite a non-VERIFIED
+  // review (review_verdict is preserved as-is). 0 / undefined = normal.
+  review_overridden?: number;
 }
 export interface TasksList { items: TaskRow[]; count: number; }
 
