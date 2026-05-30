@@ -126,7 +126,8 @@ async def list_skills(environment: Optional[str] = None,
                    user_invocable, script_count, last_modified,
                    preset_json, last_launched_at,
                    COALESCE(launch_count, 0) AS launch_count,
-                   daily_budget_usd
+                   daily_budget_usd,
+                   COALESCE(review_mode, 0) AS review_mode
             FROM skills
             WHERE {' AND '.join(clauses)}
             ORDER BY environment, name
@@ -226,6 +227,45 @@ async def skills_budget(name: str, request: Request) -> dict[str, Any]:
         return _skill_row(conn, name)
 
 
+@router.patch("/api/skills/{name}/review")
+async def skills_review(name: str, request: Request) -> dict[str, Any]:
+    """v0.7.0 — toggle the per-skill adversarial review gate.
+
+    Body: `{"review_mode": 0|1}` (JSON `true`/`false` also accepted). When on,
+    every successful non-dry-run run of a task assigned to this skill is
+    verified by an independent reviewer subagent before the task completes
+    (~2× API cost — see the v0.7.0 Cost section). Off by default. Mirrors
+    PATCH .../budget + .../autonomy as a single-column update endpoint."""
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(400, "request body required")
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        raise HTTPException(400, "body must be JSON")
+    if not isinstance(payload, dict) or "review_mode" not in payload:
+        raise HTTPException(400, "body must include 'review_mode'")
+
+    value = payload["review_mode"]
+    # Accept 0/1 or true/false; reject anything else so a typo can't silently
+    # leave review in an undefined state.
+    if isinstance(value, bool):
+        stored = 1 if value else 0
+    elif isinstance(value, int) and value in (0, 1):
+        stored = value
+    else:
+        raise HTTPException(400, "review_mode must be 0 or 1")
+
+    with db.connect() as conn:
+        rc = conn.execute(
+            "UPDATE skills SET review_mode = ? WHERE name = ?",
+            (stored, name),
+        ).rowcount
+        if rc == 0:
+            raise HTTPException(404, "skill not found")
+        return _skill_row(conn, name)
+
+
 # ---------------------------------------------------------------------------
 # v0.6.0 — preset editor + launcher
 # ---------------------------------------------------------------------------
@@ -237,7 +277,8 @@ def _skill_row(conn, name: str) -> dict[str, Any]:
                user_invocable, script_count, last_modified,
                preset_json, last_launched_at,
                COALESCE(launch_count, 0) AS launch_count,
-               daily_budget_usd
+               daily_budget_usd,
+               COALESCE(review_mode, 0) AS review_mode
         FROM skills WHERE name = ?
         """,
         (name,),

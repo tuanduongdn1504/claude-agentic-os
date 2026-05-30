@@ -14,6 +14,7 @@ const RISKS = ['low', 'medium', 'high'];
 export function TaskComposer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
+  const [successCriteria, setSuccessCriteria] = useState('');
   const [skill, setSkill] = useState('');
   const [model, setModel] = useState('');
   const [mode, setMode] = useState<TaskMode>('classic');
@@ -29,7 +30,7 @@ export function TaskComposer({ open, onClose }: { open: boolean; onClose: () => 
 
   useEffect(() => {
     if (!open) return;
-    setTitle(''); setDescription(''); setSkill(''); setModel('');
+    setTitle(''); setDescription(''); setSuccessCriteria(''); setSkill(''); setModel('');
     setMode('classic'); setPriority(5); setQuadrant('do'); setRisk('low');
     setRequiresApproval(false); setDryRun(false);
     requestAnimationFrame(() => titleRef.current?.focus());
@@ -41,6 +42,7 @@ export function TaskComposer({ open, onClose }: { open: boolean; onClose: () => 
     const payload: NewTask = {
       title: title.trim(),
       description: description.trim() || undefined,
+      success_criteria: successCriteria.trim() || undefined,
       assigned_skill: skill || undefined,
       model: model || undefined,
       execution_mode: mode,
@@ -78,6 +80,19 @@ export function TaskComposer({ open, onClose }: { open: boolean; onClose: () => 
             value={description}
             onChange={e => setDescription(e.target.value)}
             placeholder="Context, constraints, acceptance criteria…"
+          />
+        </Label>
+
+        {/* v0.7.0 — optional success criteria. Only sharpens the reviewer
+            prompt when the assigned skill has review_mode on; ignored
+            otherwise. Free text, no client-side validation. */}
+        <Label hint="optional · read by the reviewer">
+          Success criteria
+          <Textarea
+            value={successCriteria}
+            onChange={e => setSuccessCriteria(e.target.value)}
+            placeholder={'EARS-ish, e.g. "WHEN the build runs, THE system SHALL exit 0 and write dist/app.js"'}
+            data-testid="task-success-criteria"
           />
         </Label>
 

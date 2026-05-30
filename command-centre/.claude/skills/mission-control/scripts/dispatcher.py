@@ -185,6 +185,19 @@ def _skill_autonomy(skill_name: str | None) -> str:
     return (row["autonomy_level"] if row else "auto") or "auto"
 
 
+# v0.7.0 — per-skill adversarial review opt-in. Mirrors _skill_autonomy: a
+# single-column lookup. `None`/missing skill → False (off). review_mode is the
+# ONLY trigger for the review gate — success_criteria alone never triggers it.
+def _skill_review_mode(skill_name: str | None) -> bool:
+    if not skill_name:
+        return False
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT review_mode FROM skills WHERE name = ?", (skill_name,)
+        ).fetchone()
+    return bool(row and row["review_mode"])
+
+
 # v0.6.7 — per-skill daily cost budget. Returns (budget, today_spend) where
 # `budget is None` means no cap is set. Post-hoc shape matches the global cap:
 # we refuse when `today_spend >= budget`, never preemptive.
@@ -265,6 +278,14 @@ def _build_prompt(task: dict) -> str:
     if task.get("dry_run"):
         parts.append("")
         parts.append("DRY RUN — describe the steps you would take, don't execute.")
+    # v0.7.0 — retry composition. When a prior reviewer rejected this work
+    # (review_count > 0 with stored feedback), prepend the reason so the re-run
+    # addresses it. Mirrors the v0.6.4 follow-up composition: SAME task id,
+    # feedback appended — it does not create a new task.
+    if (task.get("review_count") or 0) > 0 and task.get("review_feedback"):
+        parts.append("")
+        parts.append("PRIOR REVIEW REJECTED THIS WORK — address it:")
+        parts.append(str(task["review_feedback"]))
     return "\n".join(parts).strip()
 
 
@@ -487,6 +508,155 @@ def _run_stream(task: dict) -> dict:
         marker.unlink(missing_ok=True)
 
 
+# -- Adversarial review gate (v0.7.0) -----------------------------------
+#
+# Ported from cc-sdd's /kiro-impl Implementer+Reviewer pattern (Storm Bear
+# wiki Pattern #76). After a review_mode skill's implementer exits ok, an
+# INDEPENDENT reviewer `claude -p` child re-reads the workspace (same cwd +
+# env, so it sees the files the implementer touched — fresh evidence, not
+# self-report) and emits a verdict that gates completion.
+
+# Case-sensitive verdict tokens (spec step 4). The separator after the token
+# may be an em-dash, a single hyphen, or a double hyphen — or absent (VERIFIED
+# carries no reason). The reason is the trailing free text.
+_REVIEW_VERDICT_RE = re.compile(
+    r"^\s*VERDICT:\s*(VERIFIED|NOT_VERIFIED|MANUAL_VERIFY_REQUIRED)\s*(?:—|-{1,2})?\s*(.*)$"
+)
+
+
+def _parse_review_verdict(text: str) -> dict | None:
+    """Scan `text` for the LAST line matching the VERDICT marker.
+
+    Returns {"verdict": str, "reason": str | None}, or None when no line
+    matches (the caller applies the fail-safe). Last-match-wins so a stray
+    earlier "VERDICT:" inside the reviewer's reasoning can't beat the final
+    line. Pure function — unit-smokeable without a subprocess."""
+    found: dict | None = None
+    for line in (text or "").splitlines():
+        m = _REVIEW_VERDICT_RE.match(line)
+        if m:
+            reason = (m.group(2) or "").strip() or None
+            found = {"verdict": m.group(1), "reason": reason}
+    return found
+
+
+def _build_review_prompt(task: dict, impl_result: dict) -> str:
+    """Compose the reviewer prompt. success_criteria (when set) appears
+    verbatim; absent → "(none specified — judge against INTENT)". Reuses the
+    same summary_head slice as run_once (last 20 stdout lines) for the
+    implementer-output tail. Pure — stop-condition 9 unit-smokes it."""
+    out_lines = (impl_result.get("stdout") or "").strip().splitlines()
+    impl_tail = "\n".join(out_lines[-20:]) if out_lines else "(no output captured)"
+    criteria = task.get("success_criteria")
+    criteria_text = (
+        str(criteria) if (criteria and str(criteria).strip())
+        else "(none specified — judge against INTENT)"
+    )
+    return "\n".join([
+        "You are an INDEPENDENT reviewer. Do NOT trust the implementer's",
+        "self-report — verify against the actual workspace.",
+        "",
+        f"TASK: {task.get('title') or '(untitled)'}",
+        f"INTENT: {task.get('description') or '(none)'}",
+        f"SUCCESS CRITERIA: {criteria_text}",
+        "",
+        "IMPLEMENTER OUTPUT (tail of its run):",
+        impl_tail,
+        "",
+        "Independently check whether the intent + criteria were ACTUALLY met.",
+        "Re-read any files involved. Be skeptical: look for claimed-but-absent",
+        "work, partial completion, hallucinated success, unaddressed criteria.",
+        "",
+        "End with EXACTLY one line, nothing after it:",
+        "VERDICT: VERIFIED",
+        "VERDICT: NOT_VERIFIED — <one-line reason>",
+        "VERDICT: MANUAL_VERIFY_REQUIRED — <one-line reason>",
+    ])
+
+
+def _run_review(task: dict, impl_result: dict) -> dict:
+    """A second `claude -p` child that independently verifies the work.
+
+    Same blocking shape as _run_classic (stdin DEVNULL, communicate + timeout,
+    start_new_session, PID-marked mode="review" so the sweep + emergency-stop
+    argv check cover it). Runs in the SAME cwd + env via _build_env() so it can
+    re-read the implementer's files.
+
+    Returns {"verdict": str, "reason": str | None, "cost_usd": float | None}.
+
+    FAIL-SAFE (Rule 12 / Rule 2 — never silently complete): a timeout, a
+    non-zero exit, or NO parseable VERDICT line all return
+    MANUAL_VERIFY_REQUIRED. An unverifiable review escalates to a human; it
+    never auto-completes.
+
+    DEVIATION FROM SPEC, documented: the spec says "same shape as _run_classic"
+    (plain stdout) and "_run_review returns {verdict, reason}". Plain `claude
+    -p` emits no cost, but stop condition 10 requires the reviewer's spend to
+    count toward the per-skill budget + global cap (a reviewed task moves
+    today_cost_usd by ~2×). So the reviewer runs with `--output-format json`
+    (the same family as _run_stream's stream-json), the VERDICT scan runs on
+    the parsed `result` text (spec step 4), and total_cost_usd is captured +
+    returned so the gate can attribute it. If the payload isn't the expected
+    JSON, it falls back to scanning raw stdout, then to the fail-safe.
+
+    CC_REVIEW_MODEL points review at a cheaper tier; unset → resolve_model(task)
+    (the implementer's model). No cost pre-gating — post-hoc, like the budget."""
+    prompt = _build_review_prompt(task, impl_result)
+    model = os.environ.get("CC_REVIEW_MODEL") or resolve_model(task)
+    argv = [CLAUDE_CLI, "-p", prompt, "--output-format", "json"]
+    if model:
+        argv += ["--model", model]
+
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_build_env(),
+        start_new_session=True,
+    )
+    marker = _mark_child_pid(proc.pid, task["id"], "review")
+    out = ""
+    try:
+        out, _err = proc.communicate(timeout=TASK_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        return {"verdict": "MANUAL_VERIFY_REQUIRED",
+                "reason": "reviewer timed out", "cost_usd": None}
+    finally:
+        _unmark_child_pid(proc.pid)
+        marker.unlink(missing_ok=True)
+
+    if proc.returncode != 0:
+        return {"verdict": "MANUAL_VERIFY_REQUIRED",
+                "reason": f"reviewer exited rc={proc.returncode}",
+                "cost_usd": None}
+
+    # Extract the assistant text (for the VERDICT scan) + total_cost_usd from
+    # the json result envelope; fall back to raw stdout on a parse miss.
+    review_text = out
+    cost_usd: float | None = None
+    try:
+        payload = json.loads(out)
+        if isinstance(payload, dict):
+            review_text = payload.get("result") or out
+            tc = payload.get("total_cost_usd")
+            if isinstance(tc, (int, float)) and not isinstance(tc, bool):
+                cost_usd = float(tc)
+    except Exception:
+        review_text = out
+
+    parsed = _parse_review_verdict(review_text)
+    if parsed is None:
+        return {"verdict": "MANUAL_VERIFY_REQUIRED",
+                "reason": "reviewer produced no parseable verdict",
+                "cost_usd": cost_usd}
+    return {"verdict": parsed["verdict"], "reason": parsed["reason"],
+            "cost_usd": cost_usd}
+
+
 # -- Orchestration ------------------------------------------------------
 
 def _running_count() -> int:
@@ -537,6 +707,8 @@ def run_once(verbose: bool = False) -> dict[str, int]:
         "succeeded": 0, "failed": 0, "swept_pids": 0,
         "risk_gated": 0, "back_pressure": 0, "cost_capped": 0,
         "skill_budget_capped": 0,
+        # v0.7.0 — adversarial review gate outcomes.
+        "review_verified": 0, "review_retried": 0, "review_escalated": 0,
     }
     stats["swept_pids"] = _sweep_stale_pids()
 
@@ -672,13 +844,73 @@ def run_once(verbose: bool = False) -> dict[str, int]:
         summary_head = "\n".join(summary[-20:]) if summary else None
 
         if result.get("ok"):
-            task_tracker.complete_task(
-                task["id"],
-                output_summary=summary_head,
-                session_id=result.get("session_id"),
-                duration_ms=elapsed_ms,
+            # v0.7.0 — adversarial review gate. review_mode is the ONLY trigger
+            # (per skill); dry-run tasks skip it (nothing executed to verify).
+            # The non-review path below is byte-identical to pre-v0.7.0.
+            review_on = (
+                not task.get("dry_run")
+                and _skill_review_mode(task.get("assigned_skill"))
             )
-            stats["succeeded"] += 1
+            if not review_on:
+                task_tracker.complete_task(
+                    task["id"],
+                    output_summary=summary_head,
+                    session_id=result.get("session_id"),
+                    duration_ms=elapsed_ms,
+                )
+                stats["succeeded"] += 1
+            else:
+                verdict = _run_review(task, result)
+                v, reason = verdict["verdict"], verdict.get("reason")
+                # Attribute the reviewer's spend to the SAME task (post-hoc; the
+                # retry reuses this task id, so there is no separate row).
+                # Additive so the per-skill budget (v0.6.7) + global cap
+                # (v0.2.0) see BOTH children — stop condition 10.
+                review_cost = verdict.get("cost_usd")
+                if review_cost:
+                    with db.connect() as conn:
+                        conn.execute(
+                            "UPDATE ops_tasks "
+                            "SET cost_usd = COALESCE(cost_usd, 0) + ? WHERE id = ?",
+                            (review_cost, task["id"]),
+                        )
+                task_tracker.update_task(task["id"], review_verdict=v,
+                                         review_feedback=reason)
+                task_tracker.log_activity(
+                    "task_review_verdict",
+                    f"task_id={task['id']} verdict={v}",
+                    metadata={"task_id": task["id"], "verdict": v, "reason": reason},
+                )
+
+                if v == "VERIFIED":
+                    task_tracker.complete_task(
+                        task["id"],
+                        output_summary=summary_head,
+                        session_id=result.get("session_id"),
+                        duration_ms=elapsed_ms,
+                    )
+                    stats["review_verified"] += 1
+
+                elif v == "NOT_VERIFIED" and (task.get("review_count") or 0) == 0:
+                    # One automatic retry. Re-queue; the next sweep re-runs with
+                    # the feedback prepended (see _build_prompt). Hard cap at 1.
+                    task_tracker.update_task(task["id"], status="pending",
+                                             started_at=None, review_count=1)
+                    stats["review_retried"] += 1
+
+                else:
+                    # NOT_VERIFIED after the retry, OR MANUAL_VERIFY_REQUIRED →
+                    # human. Lands in awaiting_approval (exactly like the risk
+                    # gate); resolved by the EXISTING approve/reject + Telegram
+                    # /approve /cancel. No new decision wiring.
+                    task_tracker.update_task(task["id"], status="awaiting_approval",
+                                             started_at=None)
+                    stats["review_escalated"] += 1
+                    task_tracker.log_activity(
+                        "task_review_escalated",
+                        f"task_id={task['id']} verdict={v} reason={reason}",
+                        metadata={"task_id": task["id"], "verdict": v},
+                    )
         else:
             err = result.get("error") or f"rc={result.get('returncode')}"
             stderr_tail = (result.get("stderr") or "").strip().splitlines()[-5:]

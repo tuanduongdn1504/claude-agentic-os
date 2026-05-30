@@ -114,6 +114,20 @@ function describe(it: Record<string, unknown>): string {
       }
       return head;
     }
+    case 'review_escalated': {
+      // v0.7.0 — N tasks failed adversarial review (or were unverifiable) and
+      // need approval. Folds into the warning-tone count; describe() prefers
+      // it.message (supplied by the backend) so this is the fallback.
+      const n = (it.count as number) ?? 1;
+      const task = it.task_id as number | undefined;
+      const verdict = it.verdict as string | undefined;
+      const fb = it.review_feedback as string | undefined;
+      const head = `${n} task${n === 1 ? '' : 's'} need review approval`;
+      if (task != null && verdict) {
+        return `${head} — #${task} ${verdict}${fb ? ` · ${fb}` : ''}`;
+      }
+      return head;
+    }
     default:
       return JSON.stringify(it);
   }

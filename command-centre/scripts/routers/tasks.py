@@ -51,7 +51,9 @@ async def list_tasks(status: Optional[str] = None, quadrant: Optional[str] = Non
                    dry_run, quadrant, approved_at, session_id, started_at,
                    completed_at, duration_ms, cost_usd, output_summary, error_message,
                    consecutive_failures, created_at,
-                   COALESCE(cost_source, 'unknown') AS cost_source
+                   COALESCE(cost_source, 'unknown') AS cost_source,
+                   success_criteria, review_verdict,
+                   COALESCE(review_count, 0) AS review_count, review_feedback
             FROM ops_tasks
             WHERE {' AND '.join(clauses)}
             ORDER BY
@@ -110,6 +112,11 @@ async def create_task(request: Request) -> dict[str, Any]:
         "cost_source": "api_pool",
         # v0.5.0-mvp2 — trigger provenance (PRD FR20).
         "created_at_source": created_at_source,
+        # v0.7.0 — optional operator-supplied success criteria. Free text the
+        # reviewer LLM reads (no parser, Rule 5); same loose handling as
+        # description. review_verdict / review_count / review_feedback are
+        # dispatcher-owned and never set here.
+        "success_criteria": p.get("success_criteria"),
     }
     keys = ", ".join(fields.keys())
     marks = ", ".join(f":{k}" for k in fields)

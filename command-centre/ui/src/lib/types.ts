@@ -223,6 +223,9 @@ export interface SkillRow {
   // to this skill that has completed today (local).
   daily_budget_usd: number | null;
   today_cost_usd: number;
+  // v0.7.0 — adversarial review gate opt-in. `0` = off (default), `1` = verify
+  // every successful non-dry-run with an independent reviewer (~2× cost).
+  review_mode: number;
 }
 export interface SkillsList { items: SkillRow[]; count: number; }
 export interface SkillEconomicsRow {
@@ -267,6 +270,13 @@ export interface TaskRow {
   cost_usd: number | null; cost_source: CostSource;
   output_summary: string | null; error_message: string | null;
   consecutive_failures: number; created_at: string;
+  // v0.7.0 — adversarial review gate. success_criteria is operator-writable on
+  // create; the other three are dispatcher-owned (read-only). review_verdict is
+  // null until the task has been reviewed.
+  success_criteria?: string | null;
+  review_verdict?: 'VERIFIED' | 'NOT_VERIFIED' | 'MANUAL_VERIFY_REQUIRED' | null;
+  review_count?: number;
+  review_feedback?: string | null;
 }
 export interface TasksList { items: TaskRow[]; count: number; }
 
@@ -312,6 +322,11 @@ export interface DispatcherState {
   // v0.6.7 — per-skill daily budget rollup.
   skills_with_budget: number;
   skills_at_budget: number;
+  // v0.7.0 — adversarial review rollup. skills_with_review = opted-in skills;
+  // tasks_awaiting_review_approval = awaiting_approval rows with a non-NULL
+  // review_verdict (reviewer-escalated, distinct from risk-gated).
+  skills_with_review: number;
+  tasks_awaiting_review_approval: number;
 }
 
 // -- Sparklines + heatmap --

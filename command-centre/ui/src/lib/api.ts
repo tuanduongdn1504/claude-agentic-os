@@ -122,6 +122,15 @@ export const patchSkillBudget = (name: string, daily_budget_usd: number | null) 
     body: JSON.stringify({ daily_budget_usd }),
   });
 
+// v0.7.0 — per-skill adversarial review toggle. Separate endpoint from preset
+// + budget (it's a verification policy, not a launch default or spend cap).
+export const patchSkillReview = (name: string, review_mode: 0 | 1) =>
+  j<SkillRow>(`/api/skills/${encodeURIComponent(name)}/review`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ review_mode }),
+  });
+
 export const launchSkill = (name: string, opts: { description_override?: string } = {}) =>
   j<{ task_id: number; status: string; skill: string }>(
     `/api/skills/${encodeURIComponent(name)}/launch`,
@@ -167,6 +176,8 @@ export interface NewTask {
   assigned_skill?: string;
   model?: string;
   scheduled_for?: string;
+  // v0.7.0 — optional EARS-ish success criteria the reviewer reads (free text).
+  success_criteria?: string;
 }
 export const createTask = (t: NewTask) =>
   j<{ id: number; created: boolean }>('/api/tasks', {

@@ -264,6 +264,17 @@ async def system_dispatcher() -> dict[str, Any]:
               ) >= s.daily_budget_usd
             """
         ).fetchone()["n"])
+        # v0.7.0 — adversarial review rollup. skills_with_review = opted-in
+        # skills; tasks_awaiting_review_approval = awaiting_approval rows whose
+        # review_verdict is non-NULL (i.e. escalated by the reviewer, distinct
+        # from risk-gated approvals which have a NULL verdict).
+        skills_with_review = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM skills WHERE COALESCE(review_mode, 0) = 1"
+        ).fetchone()["n"])
+        tasks_awaiting_review_approval = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM ops_tasks "
+            "WHERE status='awaiting_approval' AND review_verdict IS NOT NULL"
+        ).fetchone()["n"])
 
     by_src = {"api_pool": 0.0, "max_sub": 0.0, "unknown": 0.0}
     for r in cost_rows:
@@ -293,6 +304,8 @@ async def system_dispatcher() -> dict[str, Any]:
         "risk_gated_today": risk_gated_today,
         "skills_with_budget": skills_with_budget,
         "skills_at_budget": skills_at_budget,
+        "skills_with_review": skills_with_review,
+        "tasks_awaiting_review_approval": tasks_awaiting_review_approval,
     }
 
 
@@ -529,6 +542,39 @@ async def attention() -> dict[str, Any]:
                     f"{first_name} blocked at ${first_today:.2f} / "
                     f"${first_budget:.2f}"
                     + (f" (+{n - 1} more)" if n > 1 else "")
+                ),
+            })
+
+        # v0.7.0 — review-escalated tasks. A task in awaiting_approval with a
+        # non-NULL review_verdict was escalated by the reviewer (failed
+        # verification twice, or unverifiable). Severity `warning` (amber,
+        # reusing the v0.6.7 tone) — folds into the same warning count. Distinct
+        # `kind` from the risk-gated approval so the operator knows it needs
+        # approval BECAUSE review failed, not because of the risk gate.
+        review_n = int(conn.execute(
+            "SELECT COUNT(*) AS n FROM ops_tasks "
+            "WHERE status='awaiting_approval' AND review_verdict IS NOT NULL"
+        ).fetchone()["n"])
+        if review_n:
+            first_rv = conn.execute(
+                "SELECT id, title, review_verdict, review_feedback FROM ops_tasks "
+                "WHERE status='awaiting_approval' AND review_verdict IS NOT NULL "
+                "ORDER BY COALESCE(completed_at, started_at, created_at) DESC LIMIT 1"
+            ).fetchone()
+            rv = first_rv["review_verdict"]
+            fb = first_rv["review_feedback"]
+            issues.append({
+                "kind": "review_escalated",
+                "severity": "warning",
+                "count": review_n,
+                "task_id": int(first_rv["id"]),
+                "verdict": rv,
+                "review_feedback": fb,
+                "title": f"{review_n} task{'s' if review_n != 1 else ''} need review approval",
+                "message": (
+                    f"#{first_rv['id']} {rv}"
+                    + (f" — {fb}" if fb else "")
+                    + (f" (+{review_n - 1} more)" if review_n > 1 else "")
                 ),
             })
 

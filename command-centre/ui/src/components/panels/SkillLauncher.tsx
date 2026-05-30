@@ -15,7 +15,7 @@ import { Skeleton } from '@/components/ui/Skeleton';
 import { Button } from '@/components/ui/Button';
 import { Input, Label, Select, Switch, Textarea } from '@/components/ui/Field';
 import { Badge } from '@/components/ui/Badge';
-import { useLaunchSkill, usePatchSkillBudget, usePatchSkillPreset, useSkills } from '@/hooks/useQueries';
+import { useLaunchSkill, usePatchSkillBudget, usePatchSkillPreset, usePatchSkillReview, useSkills } from '@/hooks/useQueries';
 import type { SkillPreset, SkillRow, TaskMode, TaskQuadrant } from '@/lib/types';
 import { fmtAgeSeconds, fmtUsd } from '@/lib/format';
 import { cn } from '@/lib/cn';
@@ -309,6 +309,9 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
   // default — saving the preset must NOT silently overwrite the budget and
   // vice versa.
   const patchBudget = usePatchSkillBudget();
+  // v0.7.0 — separate mutation again. Review is a verification policy, distinct
+  // from both the preset (launch defaults) and the budget (spend cap).
+  const patchReview = usePatchSkillReview();
   const p = skill.preset ?? {};
 
   const [title, setTitle] = useState(p.title ?? '');
@@ -328,6 +331,8 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
     skill.daily_budget_usd == null ? '' : String(skill.daily_budget_usd),
   );
   const [budgetError, setBudgetError] = useState<string | null>(null);
+  // v0.7.0 — adversarial review toggle. Defaults to the stored review_mode.
+  const [reviewMode, setReviewMode] = useState<boolean>(!!skill.review_mode);
   const titleRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -362,6 +367,7 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
       budgetValue = parsed;
     }
     const budgetChanged = (skill.daily_budget_usd ?? null) !== budgetValue;
+    const reviewChanged = (!!skill.review_mode) !== reviewMode;
 
     const preset: SkillPreset = {};
     if (title.trim()) preset.title = title.trim();
@@ -380,9 +386,14 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
           name: skill.name, daily_budget_usd: budgetValue,
         });
       }
+      if (reviewChanged) {
+        await patchReview.mutateAsync({
+          name: skill.name, review_mode: reviewMode ? 1 : 0,
+        });
+      }
       onClose();
     } catch {
-      /* error surfaces via patch.error / patchBudget.error below */
+      /* error surfaces via patch.error / patchBudget.error / patchReview.error below */
     }
   }
 
@@ -533,6 +544,23 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
         )}
       </div>
 
+      {/* v0.7.0 — adversarial review toggle. Its OWN row + its OWN PATCH
+          .../review call, distinct from the preset (launch defaults) and the
+          budget (spend cap). Off by default; ~doubles per-task API cost. */}
+      <div
+        className="pt-2 mt-1 border-t border-border/60 space-y-1.5"
+        data-testid="preset-editor-review"
+        data-skill={skill.name}
+        data-review-mode={reviewMode ? '1' : '0'}
+      >
+        <Kicker>Review (optional)</Kicker>
+        <Switch
+          checked={reviewMode}
+          onChange={setReviewMode}
+          label="Adversarial review — verify every successful run with an independent agent (≈2× cost)"
+        />
+      </div>
+
       {patch.error && (
         <div className="text-[11px] text-status-red bg-status-red/5 border border-status-red/20 rounded p-1.5 font-mono">
           {(patch.error as Error).message}
@@ -541,6 +569,11 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
       {patchBudget.error && (
         <div className="text-[11px] text-status-red bg-status-red/5 border border-status-red/20 rounded p-1.5 font-mono">
           {(patchBudget.error as Error).message}
+        </div>
+      )}
+      {patchReview.error && (
+        <div className="text-[11px] text-status-red bg-status-red/5 border border-status-red/20 rounded p-1.5 font-mono">
+          {(patchReview.error as Error).message}
         </div>
       )}
 
@@ -558,9 +591,9 @@ function PresetEditor({ skill, onClose }: { skill: SkillRow; onClose: () => void
           <Button type="button" size="sm" variant="ghost" onClick={onClose}>cancel</Button>
           <Button
             type="submit" size="sm" variant="primary"
-            disabled={patch.isPending || patchBudget.isPending}
+            disabled={patch.isPending || patchBudget.isPending || patchReview.isPending}
           >
-            {patch.isPending || patchBudget.isPending ? 'saving…' : 'save preset'}
+            {patch.isPending || patchBudget.isPending || patchReview.isPending ? 'saving…' : 'save preset'}
           </Button>
         </div>
       </div>

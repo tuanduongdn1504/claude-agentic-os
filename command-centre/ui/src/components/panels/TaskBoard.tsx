@@ -37,6 +37,17 @@ function statusTone(s: TaskStatus) {
   }
 }
 
+// v0.7.0 — adversarial review verdict → badge tone + glyph.
+//   ✓ VERIFIED (green) · ✗ NOT_VERIFIED (red) · ? MANUAL_VERIFY_REQUIRED (amber)
+function verdictBadge(v: string): { tone: 'green' | 'red' | 'amber'; glyph: string; label: string } {
+  switch (v) {
+    case 'VERIFIED':               return { tone: 'green', glyph: '✓', label: 'verified' };
+    case 'NOT_VERIFIED':           return { tone: 'red',   glyph: '✗', label: 'not verified' };
+    case 'MANUAL_VERIFY_REQUIRED': return { tone: 'amber', glyph: '?', label: 'manual verify' };
+    default:                       return { tone: 'amber', glyph: '?', label: v.toLowerCase() };
+  }
+}
+
 export function TaskBoard() {
   const { data, isLoading } = useTasks({});
   const trigger = useTriggerDispatcher();
@@ -141,6 +152,15 @@ function TaskCard({ task }: { task: TaskRow }) {
           (task.status === 'pending' || task.status === 'awaiting_approval')
           && task.cost_usd == null
         ) && <CostSourcePill source={task.cost_source} size="xs" />}
+        {/* v0.7.0 — review verdict badge (set once the reviewer has run). */}
+        {task.review_verdict && (() => {
+          const vb = verdictBadge(task.review_verdict);
+          return (
+            <span data-review-verdict={task.review_verdict}>
+              <Badge tone={vb.tone}>{vb.glyph} {vb.label}</Badge>
+            </span>
+          );
+        })()}
       </div>
 
       {(task.duration_ms != null || task.cost_usd != null) && (
@@ -156,6 +176,16 @@ function TaskCard({ task }: { task: TaskRow }) {
       {task.error_message && (
         <div className="text-[11px] text-status-red/80 font-mono bg-status-red/5 border border-status-red/20 rounded p-1.5 mb-2 line-clamp-2">
           {task.error_message}
+        </div>
+      )}
+
+      {/* v0.7.0 — reviewer's reason on an escalated / rejected card. */}
+      {task.review_feedback && task.review_verdict && task.review_verdict !== 'VERIFIED' && (
+        <div
+          className="text-[11px] text-status-amber/90 font-mono bg-status-amber/5 border border-status-amber/20 rounded p-1.5 mb-2 line-clamp-2"
+          data-review-feedback
+        >
+          reviewer: {task.review_feedback}
         </div>
       )}
 

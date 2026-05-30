@@ -402,6 +402,19 @@ def apply_migrations() -> None:
         # every existing skill); 0 = blocks all claims (operator temp-disable);
         # > 0 = post-hoc cap matching the v0.2.0 / v0.6.0 global cap shape.
         _migrate_add_column(conn, "skills", "daily_budget_usd", "REAL")
+        # v0.7.0 — adversarial review gate. All additive + idempotent; the
+        # NULL/0 defaults make every existing row behave exactly as
+        # pre-v0.7.0 (review_mode 0 = off → byte-identical completion path;
+        # review_count 0 = no auto-retry consumed; the three TEXT columns NULL
+        # = "not yet reviewed"). review_mode is per-skill (mirrors
+        # autonomy_level / daily_budget_usd above); the four ops_tasks columns
+        # are dispatcher-owned except success_criteria, which is operator-
+        # writable on task create (free text the reviewer LLM reads — no parser).
+        _migrate_add_column(conn, "skills",    "review_mode",      "INTEGER NOT NULL DEFAULT 0")
+        _migrate_add_column(conn, "ops_tasks", "success_criteria", "TEXT")
+        _migrate_add_column(conn, "ops_tasks", "review_verdict",   "TEXT")
+        _migrate_add_column(conn, "ops_tasks", "review_count",     "INTEGER NOT NULL DEFAULT 0")
+        _migrate_add_column(conn, "ops_tasks", "review_feedback",  "TEXT")
 
 
 # ---------------------------------------------------------------------------

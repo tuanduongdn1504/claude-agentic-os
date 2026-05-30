@@ -193,6 +193,19 @@ export function usePatchSkillBudget() {
     },
   });
 }
+// v0.7.0 — per-skill adversarial review toggle. Invalidates the dispatcher
+// rollup too (skills_with_review changes).
+export function usePatchSkillReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { name: string; review_mode: 0 | 1 }) =>
+      api.patchSkillReview(args.name, args.review_mode),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['skills'] });
+      qc.invalidateQueries({ queryKey: ['dispatcher-state'] });
+    },
+  });
+}
 export function useLaunchSkill() {
   const qc = useQueryClient();
   return useMutation({

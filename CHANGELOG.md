@@ -1,10 +1,14 @@
 # Changelog
 
-## v0.7.0 — adversarial review gate  ·  **STATUS: DRAFT (not yet built)**
+## v0.7.0 — adversarial review gate
 
 > Spec: `observability/(C) build-your-own-dashboard-prompt-v0.7.0-amendment.md`.
-> Apply on top of `main` HEAD post v0.6.7 (`026f6bf`). This entry is a DRAFT —
-> flip to shipped once built + smoke-tested.
+> Shipped on branch `claude/v0.7.0`. The spec + this DRAFT predate v0.6.8;
+> built on the actual `main` HEAD `5ce116e` (post v0.6.8). v0.6.8 ("expose
+> historical ranges") touches only `helpers/timerange.py` + the range-picker
+> UI — no overlap with the review-gate surfaces — so it composes cleanly, and
+> the dispatcher line references the spec named (run_once 674, _run_classic
+> 271, _run_stream 303, _build_prompt 260) still land exactly.
 
 The first MINOR bump since the project went patch-only at v0.2.0. Earns it:
 unlike v0.6.7 (a mechanical extension of the v0.2.0 cap shape — explicitly
@@ -31,7 +35,7 @@ anything else routes to the existing `awaiting_approval` state with the
 reviewer's reason attached. Opt-in per skill, **off by default**, because it
 ~doubles the per-task API cost.
 
-### Surfaces (planned)
+### Surfaces (built)
 
 - **Schema:** `skills.review_mode` + `ops_tasks.{success_criteria,
   review_verdict, review_count, review_feedback}` via `_migrate_add_column`.
@@ -50,6 +54,51 @@ reviewer's reason attached. Opt-in per skill, **off by default**, because it
 - **Cost-honest:** reviewer spend is `api_pool`, counts toward the global cap
   (v0.2.0) + per-skill budget (v0.6.7) post-hoc; `CC_REVIEW_MODEL` allows a
   cheaper review tier.
+
+### Verified
+
+- `command-centre/scripts/dev/smoke_v0_7_0.py` — **69 / 69**, all 12 stop
+  conditions: VERIFIED happy path; NOT_VERIFIED → one auto-retry → escalate;
+  MANUAL_VERIFY_REQUIRED immediate escalation; no-verdict + crash + timeout
+  fail-safes (real `_run_review` driven through a stubbed `subprocess.Popen`);
+  verdict-parser fixtures (`—` / `-` / `--` separators, case-sensitivity,
+  last-match-wins); `review_mode`-off byte-identical completion; dry-run skip;
+  `success_criteria` reaches the reviewer prompt; cost attribution (~2× a
+  non-reviewed task); review PID marker `mode="review"` + sweep coverage;
+  dispatcher `review` rollup + `/api/attention` `review_escalated` (warning);
+  approve re-dispatch; and the Telegram `review_gated` notification.
+- `command-centre/ui/tests/e2e/v0.7.0.spec.ts` — **3 / 3** (editor review
+  toggle → PATCH `.../review`; TaskBoard ✓ / ✗ / ? verdict badges +
+  reviewer-reason line). `tsc --noEmit` clean; `vite build` clean.
+- Backward compat (stop 12): smoke_mvp2 24/24 · v0.6.1 20/20 · v0.6.2 39/39 ·
+  v0.6.4 45/45 · v0.6.5 43/43 · v0.6.7 35/35 · v0.6.8 26/26; e2e
+  v0.6.6/v0.6.7/v0.6.8 **11 / 11** — all unchanged.
+
+### Implementation notes (deviations from the spec, flagged)
+
+Two refinements of the spec's *illustrative* pseudocode, both required to make a
+stop condition true and both documented in `dispatcher._run_review`:
+
+1. **Reviewer runs `claude -p --output-format json`, not plain.** The spec says
+   "same shape as `_run_classic`" (plain stdout) and `_run_review` returns
+   `{verdict, reason}`. But plain `claude -p` emits no cost, and **stop
+   condition 10** requires the reviewer's spend to count toward the per-skill
+   budget + global cap (a reviewed task moves `today_cost_usd` by ~2×). So the
+   reviewer uses `--output-format json` (same family as `_run_stream`'s
+   stream-json); the VERDICT scan runs on the parsed `result` text (spec step
+   4) with a raw-stdout fallback, and `total_cost_usd` is captured. It stays
+   classic-shaped otherwise (blocking, stdin DEVNULL, timeout-capped, PID-marked
+   `mode="review"`, no streaming / decision / inbox machinery).
+2. **`_run_review` returns `cost_usd`; the gate adds it to the task.** Required
+   by (1): the completion block does an additive `cost_usd = COALESCE(cost_usd,
+   0) + reviewer_cost` on the same task id (no separate row), *inside the review
+   branch only* — the non-review path stays byte-identical (stop 7).
+
+Minor: the spec's "API delta" lists `GET /api/tasks/{id}`, which doesn't exist
+(only the `GET /api/tasks` list) — the review fields were added to the list
+SELECT (what TaskBoard consumes) and `success_criteria` to `POST /api/tasks`.
+The AttentionBar "click scrolls to the awaiting-approval tasks" was kept
+describe-only to match every existing attention issue (none are click-navigable).
 
 ### Deferred
 

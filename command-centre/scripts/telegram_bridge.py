@@ -300,10 +300,33 @@ def _format_risk_gated(t: dict) -> str:
     )
 
 
+def _format_review_gated(t: dict) -> str:
+    """v0.7.0 — format a review-escalated task (status=awaiting_approval with a
+    non-NULL review_verdict) for Telegram. Distinct from _format_risk_gated so
+    the operator reads WHY (the reviewer's verdict + reason) before approving.
+    Approving re-runs the task with the feedback prepended (existing approve
+    semantics); cancelling drops it. verdict + feedback are operator-uncontrolled
+    text but flow through _md_safe to keep the Markdown parser happy."""
+    title = _md_safe((t.get("title") or "(untitled)")[:200])
+    verdict = t.get("review_verdict") or "NOT_VERIFIED"
+    reason = _md_safe((t.get("review_feedback") or "")[:400])
+    body = (
+        f"❓ *REVIEW NEEDED* `#{t['id']}` · `{verdict}`"
+        + f"\n\n{title}"
+    )
+    if reason:
+        body += f"\n\n_reviewer:_ {reason}"
+    body += (
+        f"\n\nReply `/approve {t['id']}` to re-run with this feedback, "
+        f"or `/cancel {t['id']}` to drop."
+    )
+    return body
+
+
 def _outbound_tick() -> dict:
     sent = {
         "decisions": 0, "inbox": 0, "task_complete": 0, "risk_gated": 0,
-        "skill_budget_exceeded": 0, "errors": 0,
+        "review_gated": 0, "skill_budget_exceeded": 0, "errors": 0,
     }
     # Decisions.
     try:
@@ -367,21 +390,28 @@ def _outbound_tick() -> dict:
             sent["errors"] += 1
             print(f"[telegram] /api/tasks?status={status} fetch failed: {exc!r}", file=sys.stderr)
 
-    # Risk-gated tasks (awaiting_approval).
+    # Awaiting-approval tasks. v0.7.0 — a task here is either risk-gated (NULL
+    # review_verdict) or review-escalated (non-NULL review_verdict). Branch the
+    # formatter + dedupe key so the operator sees WHY approval is needed and the
+    # two kinds track separately. BOTH resolve via the existing /approve
+    # /cancel (the reply-to-msg router treats review_gated like risk_gated).
     try:
         rg = _http_get_json(f"{DASHBOARD_URL}/api/tasks?status=awaiting_approval&limit=20")
         for t in rg.get("items", []):
             key = str(t["id"])
-            if _already_notified("risk_gated", key):
+            is_review = t.get("review_verdict") is not None
+            event_type = "review_gated" if is_review else "risk_gated"
+            if _already_notified(event_type, key):
                 continue
             try:
-                mid = _send_message(_format_risk_gated(t))
+                text = _format_review_gated(t) if is_review else _format_risk_gated(t)
+                mid = _send_message(text)
                 if mid:
-                    _record_notify("risk_gated", key, str(mid))
-                    sent["risk_gated"] += 1
+                    _record_notify(event_type, key, str(mid))
+                    sent[event_type] += 1
             except Exception as exc:
                 sent["errors"] += 1
-                print(f"[telegram] risk_gated notify failed: {exc!r}", file=sys.stderr)
+                print(f"[telegram] {event_type} notify failed: {exc!r}", file=sys.stderr)
     except Exception as exc:
         sent["errors"] += 1
         print(f"[telegram] /api/tasks?status=awaiting_approval fetch failed: {exc!r}", file=sys.stderr)
@@ -423,11 +453,12 @@ def _outbound_loop() -> None:
             stats = _outbound_tick()
             if any(stats[k] for k in (
                 "decisions", "inbox", "task_complete", "risk_gated",
-                "skill_budget_exceeded",
+                "review_gated", "skill_budget_exceeded",
             )):
                 print(
                     f"[telegram] notified d={stats['decisions']} i={stats['inbox']} "
                     f"tc={stats['task_complete']} rg={stats['risk_gated']} "
+                    f"rv={stats['review_gated']} "
                     f"sb={stats['skill_budget_exceeded']} "
                     f"err={stats['errors']}",
                     flush=True,
@@ -1324,7 +1355,10 @@ def _handle_message(msg: dict) -> None:
                 # v0.5.0-mvp2 — reply-to-msg on a 🛑 RISK-GATED notification
                 # routes to /approve. Reply-to-cancel is NOT supported per
                 # amendment (avoid accidental cancels from casual replies).
-                if event_type == "risk_gated":
+                # v0.7.0 — a ❓ REVIEW-NEEDED notification (review_gated) lands
+                # in the SAME awaiting_approval state and is resolved by the SAME
+                # /approve, so it routes here too. No new verb, no new parser.
+                if event_type in ("risk_gated", "review_gated"):
                     try:
                         _handle_approve(chat, message_id, int(event_key))
                     except (ValueError, TypeError):
@@ -1513,6 +1547,8 @@ def _handle_message(msg: dict) -> None:
                 "`/snooze <decision_id> [30m|2h|1d]` — suppress re-fire (default 30m, max 24h)\n"
                 "`/yes <decision_id>` · `/no <decision_id>` — shortcut to answer a binary decision\n\n"
                 "_Reply to a_ 🛑 _RISK-GATED notification with any text to approve._\n"
+                "_Tasks under adversarial review that fail verification land in approval —_ "
+                "`/approve <id>` _to re-run with the reviewer's feedback,_ `/cancel <id>` _to drop._\n"
                 "_Reply to a_ ❓ _DECISION notification with_ `/snooze [duration]` _to defer it,_\n"
                 "_or with just_ `/yes` _/_ `/no` _(or bare_ `yes` _/_ `no` _) to answer it._\n"
                 "_Reply to a_ ✅ _task-complete notification with a follow-up instruction "
