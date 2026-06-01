@@ -26,8 +26,14 @@
     <key>MISSION_CONTROL_DEFAULT_MODEL</key> <string>{{DEFAULT_MODEL}}</string>
     <key>MISSION_CONTROL_MAX_CONCURRENT</key> <string>3</string>
     <key>TASK_TIMEOUT_SECONDS</key> <string>1800</string>
-    <!-- Inherit a minimal PATH so `claude` on /usr/local/bin works. -->
-    <key>PATH</key> <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <!-- v0.7.2: absolute path to the operator's WORKING claude. launchd does
+         not load the login profile, so a bare `claude` resolves via PATH and
+         may hit a broken/global install. install.sh resolves the same claude
+         the operator uses interactively (login shell catches nvm/fnm/volta). -->
+    <key>CLAUDE_CLI_OVERRIDE</key>  <string>{{CLAUDE_CLI}}</string>
+    <!-- Prepend claude's own bin dir so the `node` it shebangs to is found
+         when claude is invoked by absolute path. -->
+    <key>PATH</key> <string>{{CLAUDE_DIR}}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
 
   <key>WorkingDirectory</key>

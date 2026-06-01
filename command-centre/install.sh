@@ -237,6 +237,23 @@ if [ "$DO_TELEGRAM" = "1" ]; then
   fi
 fi
 
+# ---------- resolve the operator's working claude (v0.7.2) ----------
+# launchd agents don't load the login profile, so a bare `claude` resolves via
+# the plist PATH — which can hit a broken/global install (e.g. a postinstall
+# that never ran). Resolve the SAME claude the operator uses interactively
+# (login shell catches nvm/fnm/volta) and bake its absolute path + bin dir into
+# the mission-control plist so the dispatcher spawns a working claude.
+step "Resolving claude binary"
+CLAUDE_BIN="$(zsh -lic 'command -v claude' 2>/dev/null | tail -1 || true)"
+[ -x "$CLAUDE_BIN" ] || CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+if [ -x "$CLAUDE_BIN" ]; then
+  CLAUDE_DIR="$(dirname "$CLAUDE_BIN")"
+  say "  claude → $CLAUDE_BIN"
+else
+  CLAUDE_BIN=""; CLAUDE_DIR="/usr/local/bin"
+  warn "no working claude resolved — dispatcher falls back to PATH \`claude\`"
+fi
+
 # ---------- launchd ----------
 if [ "$DO_LAUNCHD" = "1" ]; then
   step "Rendering + loading launchd plists"
@@ -252,6 +269,8 @@ if [ "$DO_LAUNCHD" = "1" ]; then
       -e "s|{{PROJECT_ROOT}}|$PROJECT_ROOT|g" \
       -e "s|{{PORT}}|$PORT|g" \
       -e "s|{{DEFAULT_MODEL}}|$MODEL|g" \
+      -e "s|{{CLAUDE_CLI}}|$CLAUDE_BIN|g" \
+      -e "s|{{CLAUDE_DIR}}|$CLAUDE_DIR|g" \
       -e "s|{{HOME}}|$HOME|g" \
       "$TEMPLATE" > "$OUT"
     launchctl unload "$OUT" 2>/dev/null || true

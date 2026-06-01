@@ -292,7 +292,10 @@ def _build_prompt(task: dict) -> str:
 def _run_classic(task: dict) -> dict:
     prompt = _build_prompt(task)
     model = resolve_model(task)
-    argv = [CLAUDE_CLI, "-p", prompt]
+    # v0.7.2: skip-permissions — the task already cleared the pre-dispatch
+    # gates (risk gate / autonomy / approval), so claude runs tools without
+    # the headless permission wall that otherwise silently no-ops every task.
+    argv = [CLAUDE_CLI, "-p", prompt, "--dangerously-skip-permissions"]
     if model:
         argv += ["--model", model]
 
@@ -326,7 +329,11 @@ def _run_stream(task: dict) -> dict:
     scans for DECISION: / INBOX: markers, tails the follow-up mailbox."""
     prompt = _build_prompt(task)
     model = resolve_model(task)
-    argv = [CLAUDE_CLI, "-p", prompt, "--output-format", "stream-json"]
+    # v0.7.2: --verbose is REQUIRED by the CLI with -p + stream-json (it errors
+    # out otherwise); skip-permissions lets the dispatched agent use tools (the
+    # pre-dispatch gates are the safety layer).
+    argv = [CLAUDE_CLI, "-p", prompt, "--output-format", "stream-json",
+            "--verbose", "--dangerously-skip-permissions"]
     if model:
         argv += ["--model", model]
 
@@ -603,7 +610,11 @@ def _run_review(task: dict, impl_result: dict) -> dict:
     (the implementer's model). No cost pre-gating — post-hoc, like the budget."""
     prompt = _build_review_prompt(task, impl_result)
     model = os.environ.get("CC_REVIEW_MODEL") or resolve_model(task)
-    argv = [CLAUDE_CLI, "-p", prompt, "--output-format", "json"]
+    # v0.7.2: skip-permissions so the reviewer can freely re-read the workspace
+    # (fresh-evidence check). --output-format json (not stream-json) needs no
+    # --verbose.
+    argv = [CLAUDE_CLI, "-p", prompt, "--output-format", "json",
+            "--dangerously-skip-permissions"]
     if model:
         argv += ["--model", model]
 

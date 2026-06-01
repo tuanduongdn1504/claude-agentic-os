@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.7.2 — dispatcher actually executes (hotfix)
+
+The autonomous dispatcher had **never successfully run a real task** — every
+feature was built against *stubbed* claude in smoke tests, so the broken live
+invocation went unnoticed until the first real `/run` from a phone returned
+`rc=1`. Three compounding bugs, all in the dispatch→claude→execute path:
+
+1. **Wrong claude binary under launchd.** launchd agents don't load the login
+   profile, so the plist PATH resolved a **broken global** `/usr/local/bin/claude`
+   ("native binary not installed") instead of the operator's working nvm claude.
+   Fix: `install.sh` resolves the operator's claude via their login shell and
+   bakes its absolute path into the mission-control plist as `CLAUDE_CLI_OVERRIDE`,
+   and prepends its bin dir to the plist PATH so claude's `node` resolves.
+2. **Missing `--verbose`.** `_run_stream` ran `claude -p … --output-format
+   stream-json`, which the CLI **rejects** without `--verbose`. Every task
+   defaults to stream mode, so every task died here. Fix: add `--verbose`.
+3. **Headless permission wall.** `claude -p` denies tool permissions by default,
+   so a task would exit 0 having written nothing (`permission_denials:[Write]`),
+   silently no-op'ing while reporting success. Fix: `--dangerously-skip-permissions`
+   on `_run_classic` / `_run_stream` / `_run_review` — the operator's pre-dispatch
+   gates (risk gate / autonomy / approval) are the safety layer; once a task is
+   cleared to run, the agent gets full tools.
+
+Validated: the exact corrected stream invocation now writes the file
+(`exit 0`, `is_error:false`, `permission_denials:[]`). Both smoke suites still
+green (v0.7.0 69/69, v0.7.1 43/43 — they stub the subprocess, so unaffected).
+
+Also folds in `ui/package-lock.json` regenerated for **arm64** — the prior lock
+pinned rollup's native dep to x64, breaking `npm run build` (hence UI deploys)
+on Apple Silicon.
+
+Deferred (v0.7.3+): the dispatcher still marks success on `returncode` alone;
+it should also inspect the stream `result` line's `is_error` so a genuine
+mid-task error can't read as "done". Lower priority now that #3 removes the
+silent-no-op path.
+
 ## v0.7.1 — accept review output as-is
 
 > Spec: `observability/(C) build-your-own-dashboard-prompt-v0.7.1-amendment.md`.
