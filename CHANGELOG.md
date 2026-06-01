@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.7.3 — tasks run in the project, not the install dir (hotfix)
+
+Bug A, found while validating v0.7.2: the dispatcher spawned claude with **no
+`cwd`**, so children inherited the launchd agent's `WorkingDirectory`
+(`~/.command-centre`) instead of `CC_PROJECT_ROOT`. The project root was set in
+the env but **never used** — so the operator's chosen project was ignored and
+tasks ran (and wrote files) in the install dir. The v0.7.2 BANANA task landed
+at `~/.command-centre/tmp/cc_phone_test.txt` instead of the project.
+
+Fix: a `_task_cwd()` helper returns `CC_PROJECT_ROOT` when it's an existing dir
+(else `None` + a loud stderr warning — a stale root like a deleted worktree
+degrades to the install dir rather than crashing every task), passed as `cwd=`
+to all three child `Popen` calls (`_run_classic` / `_run_stream` /
+`_run_review`).
+
+Verified: deployed dispatcher resolves cwd to the project root; smokes green
+(v0.7.0 69/69, v0.7.1 43/43 — subprocess stubbed).
+
 ## v0.7.2 — dispatcher actually executes (hotfix)
 
 The autonomous dispatcher had **never successfully run a real task** — every

@@ -91,6 +91,24 @@ def _build_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def _task_cwd() -> str | None:
+    """Working dir for a dispatched child. Tasks must run in the operator's
+    project (CC_PROJECT_ROOT), NOT the install dir — the launchd agent's
+    WorkingDirectory is the install dir, so without an explicit cwd the child
+    inherits it (v0.7.3, Bug A). Falls back to None (inherit) when unset or
+    missing, logging loudly on a missing dir: a stale CC_PROJECT_ROOT (e.g. a
+    deleted worktree) would otherwise silently run every task in the wrong
+    place."""
+    root = (os.environ.get("CC_PROJECT_ROOT") or "").strip()
+    if not root:
+        return None
+    if not os.path.isdir(root):
+        print(f"[dispatcher] CC_PROJECT_ROOT is not a directory: {root!r} — "
+              f"falling back to the install dir for this task", file=sys.stderr)
+        return None
+    return root
+
+
 # -- PID markers --------------------------------------------------------
 
 def _mark_child_pid(pid: int, task_id: int, mode: str) -> Path:
@@ -306,6 +324,7 @@ def _run_classic(task: dict) -> dict:
         stderr=subprocess.PIPE,
         text=True,
         env=_build_env(),
+        cwd=_task_cwd(),
         start_new_session=True,
     )
     marker = _mark_child_pid(proc.pid, task["id"], "classic")
@@ -345,6 +364,7 @@ def _run_stream(task: dict) -> dict:
         bufsize=1,
         text=True,
         env=_build_env(),
+        cwd=_task_cwd(),
         start_new_session=True,
     )
     marker = _mark_child_pid(proc.pid, task["id"], "stream")
@@ -625,6 +645,7 @@ def _run_review(task: dict, impl_result: dict) -> dict:
         stderr=subprocess.PIPE,
         text=True,
         env=_build_env(),
+        cwd=_task_cwd(),
         start_new_session=True,
     )
     marker = _mark_child_pid(proc.pid, task["id"], "review")
