@@ -56,6 +56,10 @@ PID_DIR = QUEUE_DIR / "pids"
 MAX_CONCURRENT = int(os.environ.get("MISSION_CONTROL_MAX_CONCURRENT", "3"))
 TASK_TIMEOUT_SECONDS = int(os.environ.get("TASK_TIMEOUT_SECONDS", "1800"))
 CLAUDE_CLI = os.environ.get("CLAUDE_CLI_OVERRIDE") or "claude"
+# v0.7.4 — when a child `claude -p` hits a usage/rate limit (HTTP 429) the task
+# is NOT broken; it just needs to wait for the quota to reset. Re-queue it with
+# this backoff (seconds) rather than terminal-failing it. Override via env.
+RATE_LIMIT_RETRY_BACKOFF_S = int(os.environ.get("RATE_LIMIT_RETRY_BACKOFF_S", "900"))
 DASHBOARD_URL = (
     os.environ.get("CC_DASHBOARD_URL")
     or f"http://{os.environ.get('CC_HOST', '127.0.0.1')}:{os.environ.get('CC_PORT', '8765')}"
@@ -307,6 +311,27 @@ def _build_prompt(task: dict) -> str:
     return "\n".join(parts).strip()
 
 
+def _looks_rate_limited(text: str | None) -> bool:
+    """True when a child's output indicates a transient usage/rate limit (HTTP
+    429) rather than a genuine task failure. Conservative ON PURPOSE — it keys
+    only on the API's own rate-limit signals, so a real failure is never misread
+    as one (a misread would re-queue forever instead of failing). Callers check
+    this ONLY on an already-failed run, so a successful task that merely mentions
+    "rate limit" in its output is unaffected.
+
+    Signals (any one): the headless 429 envelope's structured fields
+    (`"error":"rate_limit"`, `apiErrorStatus":429`) or claude's user-facing limit
+    message ("You've hit your limit · resets …", "usage limit")."""
+    if not text:
+        return False
+    t = text.lower()
+    if "rate_limit" in t:
+        return True
+    if "apierrorstatus" in t and "429" in t:
+        return True
+    return "hit your limit" in t or "usage limit" in t
+
+
 def _run_classic(task: dict) -> dict:
     prompt = _build_prompt(task)
     model = resolve_model(task)
@@ -339,8 +364,12 @@ def _run_classic(task: dict) -> dict:
     finally:
         _unmark_child_pid(proc.pid)
         marker.unlink(missing_ok=True)
-    return {"ok": proc.returncode == 0, "stdout": out, "stderr": err,
-            "returncode": proc.returncode}
+    _ok = proc.returncode == 0
+    return {"ok": _ok, "stdout": out, "stderr": err,
+            "returncode": proc.returncode,
+            # v0.7.4 — flag a 429 (only on failure) so run_once re-queues it.
+            "rate_limited": (not _ok)
+            and (_looks_rate_limited(out) or _looks_rate_limited(err))}
 
 
 def _run_stream(task: dict) -> dict:
@@ -385,6 +414,7 @@ def _run_stream(task: dict) -> dict:
     mailbox = QUEUE_DIR / f"{{sid}}.jsonl"  # path-resolved once we know sid
     mailbox_offset = 0
     last_text_buf: list[str] = []
+    rate_limited = False  # v0.7.4 — set on a 429 envelope; gates re-queue
     start_ts = time.monotonic()
     deadline = start_ts + TASK_TIMEOUT_SECONDS
 
@@ -477,6 +507,11 @@ def _run_stream(task: dict) -> dict:
             except Exception:
                 continue
 
+            # v0.7.4 — a usage/rate limit (429) surfaces as a structured error
+            # envelope; flag it so a failed run is re-queued (retryable) not failed.
+            if obj.get("error") == "rate_limit" or obj.get("apiErrorStatus") == 429:
+                rate_limited = True
+
             # session id arrives on the init envelope.
             if obj.get("type") == "system" and obj.get("subtype") == "init":
                 sid = obj.get("session_id") or obj.get("sessionId")
@@ -523,8 +558,14 @@ def _run_stream(task: dict) -> dict:
 
         rc = proc.poll()
         out_tail = "".join(last_text_buf)[-4000:]
-        return {"ok": (rc == 0 if rc is not None else True), "stdout": out_tail,
-                "stderr": "", "returncode": rc, "session_id": session_id}
+        ok = (rc == 0 if rc is not None else True)
+        # v0.7.4 — only a FAILED run can be rate-limited (a successful task that
+        # merely mentions "rate limit" must not be re-queued).
+        if not ok and not rate_limited:
+            rate_limited = _looks_rate_limited(out_tail)
+        return {"ok": ok, "stdout": out_tail, "stderr": "",
+                "returncode": rc, "session_id": session_id,
+                "rate_limited": (not ok) and rate_limited}
     finally:
         try:
             if proc.poll() is None:
@@ -662,9 +703,12 @@ def _run_review(task: dict, impl_result: dict) -> dict:
         marker.unlink(missing_ok=True)
 
     if proc.returncode != 0:
+        # v0.7.4 — a 429 here is transient; flag it so the task is re-queued
+        # (retryable) rather than escalated to a human as "unverifiable".
         return {"verdict": "MANUAL_VERIFY_REQUIRED",
                 "reason": f"reviewer exited rc={proc.returncode}",
-                "cost_usd": None}
+                "cost_usd": None,
+                "rate_limited": _looks_rate_limited(out)}
 
     # Extract the assistant text (for the VERDICT scan) + total_cost_usd from
     # the json result envelope; fall back to raw stdout on a parse miss.
@@ -684,7 +728,8 @@ def _run_review(task: dict, impl_result: dict) -> dict:
     if parsed is None:
         return {"verdict": "MANUAL_VERIFY_REQUIRED",
                 "reason": "reviewer produced no parseable verdict",
-                "cost_usd": cost_usd}
+                "cost_usd": cost_usd,
+                "rate_limited": _looks_rate_limited(review_text)}
     return {"verdict": parsed["verdict"], "reason": parsed["reason"],
             "cost_usd": cost_usd}
 
@@ -741,6 +786,8 @@ def run_once(verbose: bool = False) -> dict[str, int]:
         "skill_budget_capped": 0,
         # v0.7.0 — adversarial review gate outcomes.
         "review_verified": 0, "review_retried": 0, "review_escalated": 0,
+        # v0.7.4 — tasks re-queued because a child hit a usage/rate limit (429).
+        "rate_limited": 0,
     }
     stats["swept_pids"] = _sweep_stale_pids()
 
@@ -893,6 +940,20 @@ def run_once(verbose: bool = False) -> dict[str, int]:
                 stats["succeeded"] += 1
             else:
                 verdict = _run_review(task, result)
+                # v0.7.4 — reviewer hit a usage/rate limit (429): transient, not
+                # a real "unverifiable" result. Re-queue the task instead of
+                # escalating to a human; it re-runs (impl + review) after backoff.
+                if verdict.get("rate_limited"):
+                    task_tracker.requeue_for_retry(
+                        task["id"], RATE_LIMIT_RETRY_BACKOFF_S)
+                    stats["rate_limited"] += 1
+                    task_tracker.log_activity(
+                        "task_rate_limited",
+                        f"task_id={task['id']} reviewer usage-limit (429) "
+                        f"→ re-queued",
+                        metadata={"task_id": task["id"]},
+                    )
+                    continue
                 v, reason = verdict["verdict"], verdict.get("reason")
                 # Attribute the reviewer's spend to the SAME task (post-hoc; the
                 # retry reuses this task id, so there is no separate row).
@@ -955,6 +1016,19 @@ def run_once(verbose: bool = False) -> dict[str, int]:
                         f"task_id={task['id']} verdict={v} reason={reason}",
                         metadata={"task_id": task["id"], "verdict": v},
                     )
+        elif result.get("rate_limited"):
+            # v0.7.4 — transient usage/rate limit (429), NOT a real failure.
+            # Re-queue with a backoff (claim_pending honours scheduled_for) so
+            # the task runs again once quota resets — without burning it or
+            # bumping consecutive_failures.
+            task_tracker.requeue_for_retry(task["id"], RATE_LIMIT_RETRY_BACKOFF_S)
+            stats["rate_limited"] += 1
+            task_tracker.log_activity(
+                "task_rate_limited",
+                f"task_id={task['id']} usage-limit (429) → re-queued, "
+                f"retry in ~{RATE_LIMIT_RETRY_BACKOFF_S}s",
+                metadata={"task_id": task["id"]},
+            )
         else:
             err = result.get("error") or f"rc={result.get('returncode')}"
             stderr_tail = (result.get("stderr") or "").strip().splitlines()[-5:]

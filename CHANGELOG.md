@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.7.4 — a usage-limit 429 is retryable, not a failure
+
+The dispatcher terminal-`failed` any child that exited non-zero — including a
+**transient usage/rate limit (HTTP 429)**. Found while validating the v0.7.0
+review gate on real hardware: two real review-mode tasks died at the implementer
+stage with `rc=1`, `cost=0`, nothing written — the account had hit its usage
+limit ("You've hit your limit · resets …"), and each queued task was burned to
+`failed` (with `consecutive_failures++`) instead of waiting for the reset. On a
+usage-capped plan that silently fails every queued task during a cap window.
+
+This is the retryable-classification half of the v0.7.2 "Deferred (v0.7.3+)"
+note (the dispatcher trusting `returncode` alone): a 429 is not the task's fault
+and must not count as a failure.
+
+Fix:
+- `_looks_rate_limited(text)` — a deliberately **conservative** classifier keyed
+  only on the API's own 429 signals (`"error":"rate_limit"`, `apiErrorStatus":429`,
+  or claude's user-facing "hit your limit" / "usage limit" message). Checked
+  **only on an already-failed run**, so a real failure is never misread and a
+  successful task that merely mentions "rate limit" is unaffected.
+- `_run_stream` / `_run_classic` / `_run_review` now surface a `rate_limited`
+  flag on a failed run (stream mode also flags the structured 429 envelope mid-stream).
+- `run_once` re-queues a rate-limited task via the new
+  `task_tracker.requeue_for_retry(id, backoff)` — back to `pending` with a future
+  `scheduled_for` (default 900s, env `RATE_LIMIT_RETRY_BACKOFF_S`) so
+  `claim_pending` (which already honours `scheduled_for`) leaves it until quota
+  resets — **without** `fail_task` and **without** bumping `consecutive_failures`.
+  A reviewer 429 re-queues the whole task rather than escalating it to a human as
+  "unverifiable". Adds `stats["rate_limited"]` + a `task_rate_limited` activity.
+
+Verified: `scripts/dev/smoke_v0_7_4.py` **28/28** (classifier fixtures incl. the
+false-positive trap "rate limiting"; rate-limited impl/reviewer → re-queued not
+failed/escalated; backoff blocks re-claim; regressions — a real failure still
+fails, normal success + VERIFIED review still complete). Subprocess stubbed, so
+the smoke is itself unaffected by the 429 it models.
+
+**Not yet exercised against a live 429** (needs a real cap window); the
+conservative markers + only-on-failure scoping are the safety net. Known limits
+(candidate v0.7.5): no retry cap (a genuinely mis-tagged failure would re-queue
+on the backoff rather than fail); the backoff is fixed, not parsed from the
+reset time in the message.
+
+Built on branch `claude/v0.7.4-429-retryable` off `main` HEAD `ebbbc80` (v0.7.3).
+
 ## v0.7.3 — tasks run in the project, not the install dir (hotfix)
 
 Bug A, found while validating v0.7.2: the dispatcher spawned claude with **no

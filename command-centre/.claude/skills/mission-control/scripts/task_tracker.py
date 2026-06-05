@@ -171,6 +171,26 @@ def fail_task(task_id: int, error_message: str,
         )
 
 
+def requeue_for_retry(task_id: int, backoff_seconds: int) -> None:
+    """v0.7.4 — re-queue a task that hit a transient usage/rate limit (429).
+
+    Back to 'pending' with a future `scheduled_for` so `claim_pending` leaves it
+    alone until the backoff elapses (by when quota has likely reset). Deliberately
+    does NOT set status='failed' or bump `consecutive_failures`: a 429 is not the
+    task's fault and must not count toward the failure circuit-breaker."""
+    with db.connect() as conn:
+        conn.execute(
+            """
+            UPDATE ops_tasks SET
+                status='pending',
+                started_at=NULL,
+                scheduled_for=datetime('now', ?)
+            WHERE id = ?
+            """,
+            (f"+{int(backoff_seconds)} seconds", task_id),
+        )
+
+
 def log_activity(event_type: str, detail: str | None = None,
                  metadata: dict[str, Any] | None = None) -> None:
     with db.connect() as conn:
